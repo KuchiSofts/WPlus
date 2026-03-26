@@ -27,10 +27,52 @@ DATA_DIR = os.path.join(EXE_DIR, "data")
 ASSETS_DIR = os.path.join(EXE_DIR, "assets")
 
 # ── First Run Setup ──────────────────────────────────────────
+def ensure_debug_port():
+    """Enable WebView2 debug port via registry (needed for CDP injection)"""
+    import winreg
+    key_path = r"Software\Policies\Microsoft\Edge\WebView2\AdditionalBrowserArguments"
+    value = "--remote-debugging-port=9222 --remote-allow-origins=*"
+    try:
+        # Check if already set
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_READ)
+        existing = winreg.QueryValueEx(key, "*")[0]
+        winreg.CloseKey(key)
+        if "9222" in existing:
+            return False  # Already configured
+    except (FileNotFoundError, OSError):
+        pass
+    # Set registry key
+    try:
+        key = winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_WRITE)
+        winreg.SetValueEx(key, "*", 0, winreg.REG_SZ, value)
+        winreg.CloseKey(key)
+    except: pass
+    # Also set user environment variable as backup
+    try:
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment", 0, winreg.KEY_WRITE)
+        winreg.SetValueEx(key, "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", 0, winreg.REG_SZ, value)
+        winreg.CloseKey(key)
+    except: pass
+    return True  # Was first time — WhatsApp needs restart
+
 def setup():
-    """Create folders and extract bundled files on first run"""
+    """Create folders, extract files, configure registry"""
     for d in ["data", "data/Images", "data/Videos", "data/Sounds", "data/Docs"]:
         os.makedirs(os.path.join(EXE_DIR, d), exist_ok=True)
+
+    # Enable debug port on first run
+    first_run = ensure_debug_port()
+    if first_run:
+        # Show a notification that WhatsApp needs restart
+        try:
+            import ctypes
+            ctypes.windll.user32.MessageBoxW(0,
+                "WPlus has been configured!\n\n"
+                "Please restart WhatsApp Desktop for changes to take effect.\n"
+                "(Close WhatsApp from the system tray, then reopen it)\n\n"
+                "WPlus will wait and connect automatically.",
+                "WPlus — First Time Setup", 0x40)
+        except: pass
 
     # Extract bundled JS files to exe directory (if not already there or outdated)
     for filename in ["engine.js", "ui.js"]:
