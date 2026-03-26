@@ -405,42 +405,48 @@
   }
 
   function searchAndRestore(chat,saved,attempt){
-    if(attempt>15){dbg('nav','Gave up after 15 load attempts');return;}
+    var MAX_ATTEMPTS=100;  // Up to ~5000 messages
+    var startTime=searchAndRestore._startTime||(searchAndRestore._startTime=Date.now());
+    var elapsed=Date.now()-startTime;
+    var MAX_TIME=120000;  // 2 minute time budget
+
+    if(attempt>MAX_ATTEMPTS||elapsed>MAX_TIME){
+      searchAndRestore._startTime=null;
+      dbg('nav','Gave up after '+attempt+' loads ('+Math.round(elapsed/1000)+'s, '+(chat.msgs._models?chat.msgs._models.length:0)+' msgs searched)');
+      return;
+    }
 
     // Search current messages for our target
     var found=findRevokedInChat(chat,saved);
     if(found){
-      dbg('nav','FOUND! Restoring...');
+      searchAndRestore._startTime=null;
+      dbg('nav','FOUND after '+attempt+' loads! ('+Math.round(elapsed/1000)+'s)');
       applyRestore(found,saved);
-      // Scroll to it
       scrollToMsg(chat,found);
       fire('update');
       return;
     }
 
-    // Not found — try loading earlier messages
-    dbg('nav','Not found yet (attempt '+(attempt+1)+'), loading older messages...');
+    // Not found — load earlier messages (no delay between loads for speed)
+    if(attempt%20===0)dbg('nav','Loading... attempt '+attempt+', '+((chat.msgs._models||[]).length)+' msgs so far ('+Math.round(elapsed/1000)+'s)');
     try{
       var loader=window.require("WAWebChatLoadMessages");
       if(loader&&loader.loadEarlierMsgs){
         var msgsBefore=chat.msgs._models?chat.msgs._models.length:0;
         loader.loadEarlierMsgs(chat).then(function(){
           var msgsAfter=chat.msgs._models?chat.msgs._models.length:0;
-          dbg('nav','Loaded '+(msgsAfter-msgsBefore)+' more messages (total: '+msgsAfter+')');
 
           if(msgsAfter===msgsBefore){
-            dbg('nav','No more messages to load');
-            // Final attempt — search one more time
-            var lastTry=findRevokedInChat(chat,saved);
-            if(lastTry){applyRestore(lastTry,saved);scrollToMsg(chat,lastTry);fire('update');}
-            else dbg('nav','Message not found in chat history');
+            searchAndRestore._startTime=null;
+            dbg('nav','No more history ('+msgsAfter+' msgs). Message not found.');
             return;
           }
 
-          // Search again after loading
-          setTimeout(function(){searchAndRestore(chat,saved,attempt+1);},500);
+          // Immediately search and load more — no delay
+          searchAndRestore(chat,saved,attempt+1);
         }).catch(function(e){
-          dbg('nav','loadEarlierMsgs error: '+e.message);
+          dbg('nav','Load error: '+e.message);
+          searchAndRestore._startTime=null;
         });
         return;
       }
@@ -751,6 +757,9 @@
     window.__wplus.ready=true;
     dbg('boot','READY — '+((CC._models||[]).length)+' chats, '+(CON?(CON._models||[]).length:0)+' contacts');
     fire('ready');
+
+    // Migrate old messages — save their media to disk files
+    setTimeout(function(){serverPost('/migrate',{});},5000);
   }
 
   // Debug API
