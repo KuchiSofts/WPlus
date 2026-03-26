@@ -357,54 +357,61 @@
     // Deleted indicator
     body+='<div style="color:#ef4444;font-size:12px;font-weight:600;margin-bottom:4px">\u{1F6AB} This message was deleted</div>';
 
-    // Detect media data — could be in m.media OR in m.body as raw base64
-    var mediaData=m.media||null;
+    // Resolve media source: file server > data URL > base64 body > thumbnail
+    var mediaUrl=null;
     var rawBody=m.body||m.text||'';
-    var isBase64Body=rawBody.length>200&&(/^\/9j\/|^data:|^AAAA|^UklG|^iVBOR|^JVBER|^T2dn/i.test(rawBody)||/^[A-Za-z0-9+\/=]{200,}$/.test(rawBody.substring(0,300)));
-    if(!mediaData&&isBase64Body){
-      // Body IS the media data — construct a data URL
-      var mimeMap={image:'image/jpeg',video:'video/mp4',ptt:'audio/ogg',audio:'audio/mpeg',sticker:'image/webp',document:'application/octet-stream'};
-      mediaData='data:'+(mimeMap[m.type]||'application/octet-stream')+';base64,'+rawBody;
+    var isBase64=rawBody.length>100&&(/^\/9j\/|^data:|^AAAA|^UklG|^iVBOR|^T2dn|^GkXE/i.test(rawBody));
+    var isMediaType=['image','video','ptt','audio','sticker','document'].indexOf(m.type)!==-1;
+    var mimeMap={image:'image/jpeg',video:'video/mp4',ptt:'audio/ogg',audio:'audio/mpeg',sticker:'image/webp'};
+
+    // Priority 1: file on disk (served by file server)
+    if(m.mediaFile){
+      mediaUrl='http://127.0.0.1:18733/media/'+m.mediaFile;
     }
-    var hasMediaData=!!mediaData;
+    // Priority 2: data URL in media field
+    else if(m.media&&m.media.length>50){
+      mediaUrl=m.media;
+    }
+    // Priority 3: base64 in body (for images this is the actual image, for video it's just a thumbnail)
+    else if(isBase64&&isMediaType){
+      var bodyData=rawBody.startsWith('data:')?rawBody:'data:'+(mimeMap[m.type]||'application/octet-stream')+';base64,'+rawBody;
+      mediaUrl=bodyData;
+    }
+
+    var hasMedia=!!mediaUrl;
 
     // Render media
-    if(hasMediaData&&(m.type==='image'||m.type==='sticker')){
-      body+='<img id="wplus-preview-img" src="'+mediaData+'" style="max-width:100%;max-height:250px;border-radius:6px;margin:6px 0;cursor:pointer;object-fit:contain">';
+    if(hasMedia&&(m.type==='image'||m.type==='sticker')){
+      body+='<img id="wplus-preview-img" src="'+mediaUrl+'" style="max-width:100%;max-height:250px;border-radius:6px;margin:6px 0;cursor:pointer;object-fit:contain" onerror="this.style.display=\'none\'">';
       body+='<div style="text-align:center;font-size:10px;color:#667781;margin-bottom:4px">Click image to zoom</div>';
-    } else if(hasMediaData&&m.type==='video'){
-      body+='<video id="wplus-preview-vid" controls playsinline style="max-width:100%;max-height:250px;border-radius:6px;margin:6px 0;background:#000"><source src="'+mediaData+'"></video>';
-      body+='<div id="wplus-preview-fullscreen" style="text-align:center;margin:2px 0"><span style="color:#53bdeb;font-size:11px;cursor:pointer">\u{26F6} Fullscreen</span></div>';
-    } else if(hasMediaData&&(m.type==='ptt'||m.type==='audio')){
+    } else if(hasMedia&&m.type==='video'){
+      // For video: if source is base64 thumbnail (small), show as image preview, not video player
+      if(!m.mediaFile&&!m.media&&isBase64&&rawBody.length<10000){
+        // This is just the JPEG thumbnail, not the actual video
+        body+='<div style="position:relative;cursor:pointer" id="wplus-preview-vid-thumb">';
+        body+='<img src="'+mediaUrl+'" style="max-width:100%;border-radius:6px;margin:6px 0;opacity:.7">';
+        body+='<div style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);font-size:40px">\u{25B6}</div></div>';
+        body+='<div style="text-align:center;font-size:11px;color:#8696a0;margin-bottom:4px">Video thumbnail only</div>';
+      } else {
+        body+='<video id="wplus-preview-vid" controls playsinline style="max-width:100%;max-height:250px;border-radius:6px;margin:6px 0;background:#000"><source src="'+mediaUrl+'"></video>';
+        body+='<div id="wplus-preview-fullscreen" style="text-align:center;margin:2px 0"><span style="color:#53bdeb;font-size:11px;cursor:pointer">\u{26F6} Fullscreen</span></div>';
+      }
+    } else if(hasMedia&&(m.type==='ptt'||m.type==='audio')){
       body+='<div style="padding:8px 0;display:flex;align-items:center;gap:8px">';
       body+='<span style="font-size:22px">\u{1F3A4}</span>';
-      body+='<audio controls src="'+mediaData+'" style="flex:1;height:36px"></audio></div>';
-    } else if(m.type!=='chat'&&!hasMediaData){
-      // Try loading from file server
-      var fileUrl=m.mediaFile?('http://127.0.0.1:18733/media/'+m.mediaFile):null;
-      if(fileUrl&&(m.type==='image'||m.type==='sticker')){
-        body+='<img id="wplus-preview-img" src="'+fileUrl+'" style="max-width:100%;max-height:250px;border-radius:6px;margin:6px 0;cursor:pointer;object-fit:contain">';
-        hasMediaData=true; mediaData=fileUrl;
-      } else if(fileUrl&&m.type==='video'){
-        body+='<video id="wplus-preview-vid" controls playsinline style="max-width:100%;max-height:250px;border-radius:6px;margin:6px 0;background:#000"><source src="'+fileUrl+'"></video>';
-        body+='<div id="wplus-preview-fullscreen" style="text-align:center;margin:2px 0"><span style="color:#53bdeb;font-size:11px;cursor:pointer">\u{26F6} Fullscreen</span></div>';
-        hasMediaData=true; mediaData=fileUrl;
-      } else if(fileUrl&&(m.type==='ptt'||m.type==='audio')){
-        body+='<audio controls src="'+fileUrl+'" style="width:100%;margin:6px 0"></audio>';
-        hasMediaData=true; mediaData=fileUrl;
-      } else {
-        var typeLabel={image:'\u{1F4F7} Image',video:'\u{1F3AC} Video',ptt:'\u{1F3A4} Voice',audio:'\u{1F3B5} Audio',sticker:'\u{1F3A8} Sticker',document:'\u{1F4C4} Document',vcard:'\u{1F464} Contact',location:'\u{1F4CD} Location'}[m.type]||m.type;
-        body+='<div style="color:#8696a0;font-size:13px;font-style:italic;padding:12px 0;text-align:center">'+typeLabel+' \u2014 media not available</div>';
-      }
+      body+='<audio controls src="'+mediaUrl+'" style="flex:1;height:36px"></audio></div>';
+    } else if(isMediaType&&!hasMedia){
+      var typeLabel={image:'\u{1F4F7} Image',video:'\u{1F3AC} Video',ptt:'\u{1F3A4} Voice',audio:'\u{1F3B5} Audio',sticker:'\u{1F3A8} Sticker',document:'\u{1F4C4} Document'}[m.type]||m.type;
+      body+='<div style="color:#8696a0;font-size:13px;font-style:italic;padding:12px 0;text-align:center">'+typeLabel+' \u2014 media not available</div>';
     }
 
-    // Caption for media
-    if(m.caption&&hasMediaData){
+    // Caption
+    if(m.caption&&hasMedia){
       body+='<div style="color:#d1d7db;font-size:13px;line-height:1.3;margin:4px 0">'+H(m.caption.substring(0,300))+'</div>';
     }
 
-    // Text content — only show for text messages (not base64 media)
-    if(!isBase64Body&&rawBody.length>0&&rawBody.length<5000&&(m.type==='chat'||m.type==='vcard'||m.type==='location'||!hasMediaData)){
+    // Text — only for actual text messages
+    if(!isBase64&&rawBody.length>0&&rawBody.length<5000&&(m.type==='chat'||m.type==='vcard'||m.type==='location')){
       body+='<div style="color:#e9edef;font-size:14px;line-height:1.4;word-break:break-word;margin:4px 0">'+H(rawBody.substring(0,2000))+'</div>';
     }
     if(m.caption){
@@ -420,7 +427,7 @@
     // Footer with actions
     var footer='<div style="padding:10px 16px;border-top:1px solid rgba(255,255,255,.06);display:flex;gap:8px;justify-content:flex-end">';
     footer+='<button id="wplus-preview-goto" style="background:transparent;border:1px solid rgba(255,255,255,.15);color:#53bdeb;padding:6px 14px;border-radius:6px;cursor:pointer;font-size:12px;font-family:inherit">\u{2192} Go to chat</button>';
-    if(hasMediaData){
+    if(hasMedia){
       footer+='<button id="wplus-preview-dl" style="background:#25D366;border:0;color:#fff;padding:6px 14px;border-radius:6px;cursor:pointer;font-size:12px;font-family:inherit">\u{2B73} Save file</button>';
     }
     footer+='</div>';
@@ -439,21 +446,21 @@
     // Image click → fullscreen viewer with zoom
     var previewImg=document.getElementById('wplus-preview-img');
     if(previewImg){
-      previewImg.onclick=function(){openMediaViewer(mediaData,m.type,sender,m.time);};
+      previewImg.onclick=function(){openMediaViewer(mediaUrl,m.type,sender,m.time);};
     }
 
     // Video fullscreen button
     var fsBtn=document.getElementById('wplus-preview-fullscreen');
     if(fsBtn){
-      fsBtn.onclick=function(){openMediaViewer(mediaData,'video',sender,m.time);};
+      fsBtn.onclick=function(){openMediaViewer(mediaUrl,'video',sender,m.time);};
     }
 
     // Download button
     var dlBtn=document.getElementById('wplus-preview-dl');
-    if(dlBtn&&hasMediaData){
+    if(dlBtn&&hasMedia){
       dlBtn.onclick=function(){
         var ext={image:'jpg',video:'mp4',ptt:'ogg',audio:'mp3',sticker:'webp'}[m.type]||'bin';
-        var a=document.createElement('a');a.href=mediaData;
+        var a=document.createElement('a');a.href=mediaUrl;
         a.download='WPlus_'+m.type+'_'+sender+'_'+new Date(m.time).toISOString().slice(0,10)+'.'+ext;
         a.click();
       };

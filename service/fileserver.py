@@ -172,6 +172,27 @@ class Handler(BaseHTTPRequestHandler):
             self._ok({"saved": True})
             return
 
+        # Migrate — re-process old deleted messages, save their media to files
+        if self.path == "/migrate":
+            del_msgs = load_json(DEL_MSGS, [])
+            migrated = 0
+            for msg in del_msgs:
+                if msg.get("mediaFile"):
+                    continue  # Already has a file
+                media_path = self._save_media(msg)
+                if media_path:
+                    msg["mediaFile"] = media_path
+                    # Clear the base64 body to save space
+                    if msg.get("body") and len(msg.get("body","")) > 200:
+                        msg["body"] = ""
+                    if msg.get("media"):
+                        msg["media"] = ""
+                    migrated += 1
+            if migrated > 0:
+                save_json(DEL_MSGS, del_msgs)
+            self._ok({"migrated": migrated, "total": len(del_msgs)})
+            return
+
         # Cleanup — remove expired new messages + their media
         if self.path == "/cleanup":
             cutoff = time.time() * 1000 - 172800000  # 48h
@@ -197,11 +218,23 @@ class Handler(BaseHTTPRequestHandler):
         """Extract base64 media and save to file. Returns relative path or None."""
         media_b64 = data.get("media") or None
         body_b64 = data.get("body") or ""
+        msg_type = data.get("type", "")
 
-        # Check if body is base64 media
-        if not media_b64 and len(body_b64) > 200:
-            if body_b64.startswith("/9j/") or body_b64.startswith("AAAA") or body_b64.startswith("UklG"):
-                media_b64 = body_b64
+        # Check multiple sources for base64 data
+        if not media_b64:
+            # Body might be base64 media
+            if len(body_b64) > 100 and msg_type in ("image","video","ptt","audio","sticker","document"):
+                # Check common base64 prefixes
+                if (body_b64.startswith("/9j/") or  # JPEG
+                    body_b64.startswith("AAAA") or  # Various
+                    body_b64.startswith("UklG") or  # RIFF/WebP
+                    body_b64.startswith("iVBOR") or # PNG
+                    body_b64.startswith("JVBER") or # PDF
+                    body_b64.startswith("T2dn") or  # OGG
+                    body_b64.startswith("GkXE") or  # WebM
+                    body_b64.startswith("data:") or # Data URL
+                    (len(body_b64) > 500 and all(c in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=\n\r" for c in body_b64[:200]))):
+                    media_b64 = body_b64
 
         if not media_b64:
             return None
