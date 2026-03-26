@@ -165,7 +165,15 @@
       var msgId=(msg.__x_id&&msg.__x_id._serialized)?msg.__x_id._serialized:'?';
       var sender=(msg.__x_from&&msg.__x_from._serialized)?msg.__x_from._serialized:'?';
       var senderName='';
-      try{if(msg.__x_from&&CON){var c=CON.get?CON.get(sender):null;if(c)senderName=c.__x_name||c.__x_pushname||'';}}catch(e){}
+      var actualSender=sender;
+      // In groups, __x_from is group JID — actual sender is in __x_author
+      try{
+        if(msg.__x_author&&msg.__x_author._serialized)actualSender=msg.__x_author._serialized;
+        if(CON&&actualSender){
+          var c=CON.get?CON.get(actualSender):null;
+          if(c)senderName=c.__x_name||c.__x_pushname||c.__x_formattedName||'';
+        }
+      }catch(e){}
       var hasMedia=!!(msg.__x_mediaData&&msg.__x_mediaData.mediaBlob);
       var hasCaption=!!(msg.__x_caption&&msg.__x_caption.length>0);
       var bodyLen=(msg.__x_body||'').length;
@@ -176,7 +184,8 @@
         id:msgId.substring(0,50),
         type:msg.__x_type,
         chat:chatName,
-        sender:sender.split('@')[0],
+        chatJid:sender.split('@')[0],
+        sender:actualSender.split('@')[0],
         senderName:senderName,
         bodyLength:bodyLen,
         bodyPreview:(msg.__x_body||'').substring(0,50).replace(/[\n\r]/g,' '),
