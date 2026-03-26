@@ -1,0 +1,37 @@
+# Dependencies
+node_modules/
+__pycache__/
+*.pyc
+
+# Build output
+dist/
+
+# User data (never commit)
+data/Images/
+data/Videos/
+data/Sounds/
+data/Docs/
+data/deleted_messages.json
+data/new_messages.json
+data/settings.json
+data/debug.log
+data/status.txt
+
+# Temp files
+_cdp.json
+_cdp2.json
+_tmp.ps1
+_check.json
+_cdp_msg.json
+*.log
+
+# IDE
+.vscode/
+.idea/
+
+# PyInstaller
+build/
+*.spec
+release/
+*.zip
+WPlus.exe
