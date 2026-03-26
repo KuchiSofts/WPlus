@@ -1,0 +1,16 @@
+{
+  "name": "wplus",
+  "version": "2.0.0",
+  "description": "WPlus — Message protection & privacy toolkit for WhatsApp Desktop",
+  "author": "KuchiSofts",
+  "license": "MIT",
+  "repository": "https://github.com/KuchiSofts/WPlus",
+  "scripts": {
+    "build": "node build.mjs",
+    "start": "pythonw service/wplus_service.pyw"
+  },
+  "devDependencies": {
+    "esbuild": "^0.27.4",
+    "typescript": "^6.0.2"
+  }
+}
