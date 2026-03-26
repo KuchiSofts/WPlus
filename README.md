@@ -1,148 +1,194 @@
 <p align="center">
-  <img src="https://img.shields.io/badge/WPlus-v2.0-25D366?style=for-the-badge&logo=whatsapp&logoColor=white" alt="WPlus">
-  <img src="https://img.shields.io/badge/license-MIT-blue?style=for-the-badge" alt="MIT License">
-  <img src="https://img.shields.io/badge/platform-Windows-0078D6?style=for-the-badge&logo=windows&logoColor=white" alt="Windows">
-  <img src="https://img.shields.io/badge/TypeScript-007ACC?style=for-the-badge&logo=typescript&logoColor=white" alt="TypeScript">
+  <img src="assets/icon-128.png" alt="WPlus" width="80">
 </p>
 
 <h1 align="center">WPlus</h1>
-<p align="center"><strong>Message protection & privacy toolkit for WhatsApp Desktop</strong></p>
-<p align="center">Free, open source, no accounts, no servers, no tracking.</p>
+
+<p align="center">
+  <strong>Message protection & privacy toolkit for WhatsApp Desktop</strong>
+</p>
+
+<p align="center">
+  <a href="https://github.com/KuchiSofts/WPlus/releases/latest"><img src="https://img.shields.io/github/v/release/KuchiSofts/WPlus?style=flat-square&color=25D366" alt="Release"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/KuchiSofts/WPlus?style=flat-square" alt="License"></a>
+  <a href="https://github.com/KuchiSofts/WPlus/releases"><img src="https://img.shields.io/github/downloads/KuchiSofts/WPlus/total?style=flat-square&color=blue" alt="Downloads"></a>
+  <img src="https://img.shields.io/badge/platform-Windows-0078D6?style=flat-square" alt="Windows">
+</p>
+
+<p align="center">
+  Free &bull; Open Source &bull; No accounts &bull; No servers &bull; No tracking
+</p>
+
+---
+
+## Quick Start
+
+**Download [WPlus.exe](https://github.com/KuchiSofts/WPlus/releases/latest) &rarr; Run it &rarr; Done.**
+
+On first run WPlus configures itself automatically. If WhatsApp is already open you will be asked to restart it once. The **W+** shield icon appears in your system tray.
 
 ---
 
 ## Features
 
+### Message Protection
 | Feature | Description |
 |---------|-------------|
-| **Deleted Messages** | Saves incoming messages. If deleted, view the original content with media. |
-| **Force Restore** | Shield icon in chat header — loads full history and restores all deleted messages. |
-| **Blur Messages** | Blur text in conversations. Hover to reveal. |
-| **Blur Contacts** | Hide names everywhere — sidebar, header, inside messages. |
-| **Blur Photos** | Blur profile pictures. Hover to reveal. |
-| **Hide Typing** | Others can't see you typing. |
-| **Hide Online** | Appear offline while using WhatsApp. |
-| **No Read Receipts** | Disable blue ticks. |
-| **Private Audio** | Listen to voice messages without notifying sender. |
-| **Export Contacts** | Download all contacts as CSV. |
-| **Chat Statistics** | View chat analytics and top conversations. |
-| **Load Older Messages** | Scroll-up button to load chat history. |
-| **Media Viewer** | Fullscreen image viewer with zoom, video player with volume control. |
-| **Message Preview** | Click saved messages to preview content without navigating. |
-| **Debug System** | Full event logging for troubleshooting. |
+| **Save deleted messages** | Incoming messages are backed up. If someone deletes a message you still see the original. |
+| **Force restore** | Shield button in chat header loads full history and restores all deleted messages. |
+| **Media preservation** | Deleted images, videos, and voice messages saved to disk. |
+| **Navigate to message** | Click any saved message to jump directly to it in the chat. |
 
-## Installation
+### Privacy
+| Feature | Description |
+|---------|-------------|
+| **Blur messages** | Blur text in conversations. Hover to reveal. |
+| **Blur contacts** | Hide names everywhere including inside group messages. |
+| **Blur photos** | Blur profile pictures. Hover to reveal. |
+| **Hide typing** | Others cannot see you typing. |
+| **Hide online** | Appear offline while using WhatsApp. |
+| **No read receipts** | Disable blue ticks. |
+| **Private audio** | Listen to voice messages without notifying sender. |
 
-### Requirements
+### Tools
+| Feature | Description |
+|---------|-------------|
+| **Export contacts** | Download all contacts as CSV. |
+| **Chat statistics** | Message counts, top chats, group counts. |
+| **Load older messages** | Scroll-up button to load chat history. |
+| **Fullscreen media** | Image zoom, video player with volume, audio player. |
+| **Auto-update** | Checks for new releases on startup. |
+| **Debug logging** | Full event log for troubleshooting. |
+
+---
+
+## How It Works
+
+WPlus runs as a lightweight system tray app. It connects to WhatsApp Desktop through its WebView2 debug bridge and injects two JavaScript files.
+
+```
+WPlus.exe (tray)
+  ├── Detects WhatsApp process
+  ├── Connects via Chrome DevTools Protocol
+  ├── Injects engine.js + ui.js
+  ├── Syncs data to disk
+  ├── Re-injects on WhatsApp restart
+  └── Cleans up on exit
+```
+
+**No files are modified.** WPlus runs in memory only.
+
+---
+
+## Tray Menu
+
+Right-click the **W+** icon:
+
+| Option | Description |
+|--------|-------------|
+| **Re-inject Plugin** | Force re-inject |
+| **Check for Updates** | Check for new versions |
+| **Open Data Folder** | Browse saved messages and media |
+| **GitHub** | Visit the repository |
+| **Quit WPlus** | Stop and uninject |
+
+---
+
+## Data Storage
+
+```
+WPlus.exe
+ └── data/
+     ├── deleted_messages.json
+     ├── settings.json
+     ├── Images/
+     ├── Videos/
+     ├── Sounds/
+     └── Docs/
+```
+
+Everything stays on your machine. Nothing is sent externally.
+
+---
+
+## Requirements
+
 - **WhatsApp Desktop** (Microsoft Store)
-- **Python 3.10+** with `pystray` and `Pillow`
-- **Node.js 18+** (for building from TypeScript source)
 - **Windows 10/11**
 
-### Quick Start
+No Python or Node.js needed. `WPlus.exe` is fully self-contained.
+
+---
+
+## Building from Source
 
 ```bash
 git clone https://github.com/KuchiSofts/WPlus.git
 cd WPlus
-scripts\install.bat     # First-time setup (one time only)
-# Restart WhatsApp Desktop
-WPlus.bat               # Start the tray service
+pip install pystray Pillow pyinstaller
+npm install && npm run build
+
+pyinstaller --onefile --windowed --name WPlus --icon assets/WPlus.ico \
+  --add-data "engine.js;." --add-data "ui.js;." \
+  --add-data "service/fileserver.py;." --add-data "assets/icon-64.png;assets" \
+  service/wplus.py
 ```
 
-### Building from Source
-
-```bash
-npm install
-npm run build           # Compiles src/ → dist/
-```
-
-## Architecture
+<details>
+<summary><strong>Project Structure</strong></summary>
 
 ```
 WPlus/
-├── src/                          # TypeScript source
-│   ├── engine.ts                 # Main engine entry
-│   ├── ui.ts                     # UI entry (WIP)
-│   ├── types.ts                  # Type definitions
-│   ├── constants.ts              # Config & selectors
+├── src/                    TypeScript source
+│   ├── engine.ts           Engine entry
+│   ├── types.ts            Type definitions
+│   ├── constants.ts        Config
 │   ├── features/
-│   │   ├── messages.ts           # Message backup & restore
-│   │   ├── navigation.ts         # Chat navigation & history loading
-│   │   └── privacy.ts            # Blur, typing, online, receipts
+│   │   ├── messages.ts     Backup & restore
+│   │   ├── navigation.ts   Chat navigation
+│   │   └── privacy.ts      Privacy hooks
 │   └── utils/
-│       ├── debug.ts              # Debug logging
-│       ├── modules.ts            # WhatsApp module finder
-│       ├── server.ts             # File server client
-│       └── storage.ts            # localStorage helpers
-├── engine.js                     # Compiled engine (injected into WhatsApp)
-├── ui.js                         # Compiled UI (injected into WhatsApp)
-├── service/                      # Python backend
-│   ├── wplus_service.pyw         # System tray service
-│   ├── injector.py               # CDP injector (CLI)
-│   └── fileserver.py             # Local HTTP server for media
-├── scripts/
-│   ├── install.bat               # First-time setup
-│   └── uninstall.bat             # Remove WPlus
-├── data/                         # User data (gitignored)
-│   ├── Images/                   # Saved image files
-│   ├── Videos/                   # Saved video files
-│   ├── Sounds/                   # Saved audio files
-│   ├── Docs/                     # Saved documents
-│   ├── deleted_messages.json     # Permanent deleted message archive
-│   └── new_messages.json         # Rolling 24h message backup
-├── WPlus.bat                     # One-click launcher
-├── tsconfig.json
-├── build.mjs
-└── package.json
+│       ├── debug.ts        Logging
+│       ├── modules.ts      WhatsApp module finder
+│       ├── server.ts       File server client
+│       └── storage.ts      Storage helpers
+├── service/                Python backend
+│   ├── wplus.py            Main entry
+│   ├── injector.py         CDP injector
+│   └── fileserver.py       Media server
+├── engine.js + ui.js       Compiled JS
+└── assets/                 Icons
 ```
+</details>
 
-### How It Works
+---
 
-```
-WhatsApp Desktop (WebView2)
-    │ CDP (Chrome DevTools Protocol)
-    │
-├── engine.js    Hooks into WhatsApp's internal modules:
-│                ChatCollection, Msg events, Composing,
-│                Presence, ConversationSeen, ChatLoadMessages
-│
-├── ui.js        Settings panel (matches WhatsApp's native design),
-│                deleted messages viewer, media viewer, debug panel
-│
-└── service/     Python tray service:
-    ├── Auto-detects WhatsApp process
-    ├── Injects engine.js + ui.js via CDP
-    ├── Syncs data to disk every 5 seconds
-    ├── Saves media to organized folders
-    ├── Uninjects cleanly on exit
-    └── Re-injects on WhatsApp restart
-```
+## FAQ
 
-### Privacy
+<details>
+<summary><strong>Is this safe?</strong></summary>
+Yes. WPlus runs locally and never sends data externally. Source code is fully open.
+</details>
 
-- All data stored locally — never sent anywhere
-- No external servers, analytics, or telemetry
-- No accounts or registration
-- Media saved to local folders only
-- Privacy hooks use WhatsApp's own internal APIs
+<details>
+<summary><strong>Will this get my account banned?</strong></summary>
+WPlus only reads messages and modifies the local UI. It does not send automated messages or interact with WhatsApp servers.
+</details>
 
-## Uninstall
+<details>
+<summary><strong>How do I update?</strong></summary>
+WPlus checks automatically on startup. You can also right-click tray &rarr; Check for Updates.
+</details>
 
-```bash
-scripts\uninstall.bat
-# Restart WhatsApp Desktop
-```
+<details>
+<summary><strong>How do I uninstall?</strong></summary>
+Delete WPlus.exe and the data folder. To remove the registry key run scripts/uninstall.bat or delete HKCU\Software\Policies\Microsoft\Edge\WebView2\AdditionalBrowserArguments manually.
+</details>
 
-## Contributing
+---
 
-1. Fork this repository
-2. `npm install` and `npm run build`
-3. Edit TypeScript in `src/`
-4. Test with `python service/injector.py`
-5. Submit a PR
+## License
 
-## Credits
+[MIT](LICENSE) &mdash; Free for everyone, forever.
 
-Developed by **[KuchiSofts](https://github.com/KuchiSofts)**.
-
-<p align="center"><sub>MIT License — Free for everyone, forever.</sub></p>
+<p align="center"><sub>Built by <a href="https://github.com/KuchiSofts">KuchiSofts</a></sub></p>
