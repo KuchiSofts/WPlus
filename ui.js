@@ -226,24 +226,8 @@
         var m=allMsgs.slice().reverse()[idx];
         if(!m)return;
 
-        // Check if this is a media message with data
-        var rawBody=m.body||m.text||'';
-        var isBase64=rawBody.length>200&&(/^\/9j\/|^data:|^AAAA|^UklG|^iVBOR|^T2dn/i.test(rawBody)||/^[A-Za-z0-9+\/=]{200,}$/.test(rawBody.substring(0,300)));
-        var mediaUrl=m.media||null;
-        if(!mediaUrl&&isBase64){
-          var mimeMap={image:'image/jpeg',video:'video/mp4',ptt:'audio/ogg',audio:'audio/mpeg',sticker:'image/webp'};
-          mediaUrl='data:'+(mimeMap[m.type]||'application/octet-stream')+';base64,'+rawBody;
-        }
-
-        var mediaTypes=['image','video','ptt','audio','sticker'];
-        if(mediaUrl&&mediaTypes.indexOf(m.type)!==-1){
-          // Open fullscreen media viewer directly
-          var sender=m.sender?(m.sender+'').split('@')[0]:'?';
-          openMediaViewer(mediaUrl,m.type,sender,m.time);
-        } else {
-          // Text message — open preview popup
-          showPreview(m);
-        }
+        // Always open in chat bubble preview — media viewer opens from inside it
+        showPreview(m);
       };
     });
 
@@ -381,19 +365,41 @@
 
     // Render media
     if(hasMediaData&&(m.type==='image'||m.type==='sticker')){
-      body+='<img id="wplus-preview-img" src="'+mediaData+'" style="max-width:100%;border-radius:6px;margin:4px 0;cursor:pointer">';
+      body+='<img id="wplus-preview-img" src="'+mediaData+'" style="max-width:100%;max-height:250px;border-radius:6px;margin:6px 0;cursor:pointer;object-fit:contain">';
+      body+='<div style="text-align:center;font-size:10px;color:#667781;margin-bottom:4px">Click image to zoom</div>';
     } else if(hasMediaData&&m.type==='video'){
-      body+='<video id="wplus-preview-vid" controls playsinline style="max-width:100%;max-height:300px;border-radius:6px;margin:4px 0"><source src="'+mediaData+'"></video>';
-      body+='<div id="wplus-preview-fullscreen" style="text-align:center;margin:4px 0"><span style="color:#53bdeb;font-size:12px;cursor:pointer">\u{26F6} Fullscreen</span></div>';
+      body+='<video id="wplus-preview-vid" controls playsinline style="max-width:100%;max-height:250px;border-radius:6px;margin:6px 0;background:#000"><source src="'+mediaData+'"></video>';
+      body+='<div id="wplus-preview-fullscreen" style="text-align:center;margin:2px 0"><span style="color:#53bdeb;font-size:11px;cursor:pointer">\u{26F6} Fullscreen</span></div>';
     } else if(hasMediaData&&(m.type==='ptt'||m.type==='audio')){
-      body+='<audio controls src="'+mediaData+'" style="width:100%;margin:6px 0"></audio>';
+      body+='<div style="padding:8px 0;display:flex;align-items:center;gap:8px">';
+      body+='<span style="font-size:22px">\u{1F3A4}</span>';
+      body+='<audio controls src="'+mediaData+'" style="flex:1;height:36px"></audio></div>';
     } else if(m.type!=='chat'&&!hasMediaData){
-      var typeLabel={image:'\u{1F4F7} Image',video:'\u{1F3AC} Video',ptt:'\u{1F3A4} Voice message',audio:'\u{1F3B5} Audio',sticker:'\u{1F3A8} Sticker',document:'\u{1F4C4} Document',vcard:'\u{1F464} Contact',location:'\u{1F4CD} Location'}[m.type]||m.type;
-      body+='<div style="color:#8696a0;font-size:14px;font-style:italic;padding:8px 0">'+typeLabel+' (media not saved)</div>';
+      // Try loading from file server
+      var fileUrl=m.mediaFile?('http://127.0.0.1:18733/media/'+m.mediaFile):null;
+      if(fileUrl&&(m.type==='image'||m.type==='sticker')){
+        body+='<img id="wplus-preview-img" src="'+fileUrl+'" style="max-width:100%;max-height:250px;border-radius:6px;margin:6px 0;cursor:pointer;object-fit:contain">';
+        hasMediaData=true; mediaData=fileUrl;
+      } else if(fileUrl&&m.type==='video'){
+        body+='<video id="wplus-preview-vid" controls playsinline style="max-width:100%;max-height:250px;border-radius:6px;margin:6px 0;background:#000"><source src="'+fileUrl+'"></video>';
+        body+='<div id="wplus-preview-fullscreen" style="text-align:center;margin:2px 0"><span style="color:#53bdeb;font-size:11px;cursor:pointer">\u{26F6} Fullscreen</span></div>';
+        hasMediaData=true; mediaData=fileUrl;
+      } else if(fileUrl&&(m.type==='ptt'||m.type==='audio')){
+        body+='<audio controls src="'+fileUrl+'" style="width:100%;margin:6px 0"></audio>';
+        hasMediaData=true; mediaData=fileUrl;
+      } else {
+        var typeLabel={image:'\u{1F4F7} Image',video:'\u{1F3AC} Video',ptt:'\u{1F3A4} Voice',audio:'\u{1F3B5} Audio',sticker:'\u{1F3A8} Sticker',document:'\u{1F4C4} Document',vcard:'\u{1F464} Contact',location:'\u{1F4CD} Location'}[m.type]||m.type;
+        body+='<div style="color:#8696a0;font-size:13px;font-style:italic;padding:12px 0;text-align:center">'+typeLabel+' \u2014 media not available</div>';
+      }
     }
 
-    // Text content — only show if it's actual text, not base64
-    if(!isBase64Body&&rawBody.length>0&&rawBody.length<5000){
+    // Caption for media
+    if(m.caption&&hasMediaData){
+      body+='<div style="color:#d1d7db;font-size:13px;line-height:1.3;margin:4px 0">'+H(m.caption.substring(0,300))+'</div>';
+    }
+
+    // Text content — only show for text messages (not base64 media)
+    if(!isBase64Body&&rawBody.length>0&&rawBody.length<5000&&(m.type==='chat'||m.type==='vcard'||m.type==='location'||!hasMediaData)){
       body+='<div style="color:#e9edef;font-size:14px;line-height:1.4;word-break:break-word;margin:4px 0">'+H(rawBody.substring(0,2000))+'</div>';
     }
     if(m.caption){
