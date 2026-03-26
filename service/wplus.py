@@ -11,7 +11,10 @@ Single exe that contains everything:
 
 On first run, creates data/ folder structure.
 """
-import sys, os, json, http.client, time, subprocess, threading, base64, tempfile
+import sys, os, json, http.client, time, subprocess, threading, base64, tempfile, ssl
+
+CURRENT_VERSION = "2.0.0"
+GITHUB_REPO = "KuchiSofts/WPlus"
 
 # ── Path Setup ───────────────────────────────────────────────
 if getattr(sys, 'frozen', False):
@@ -266,6 +269,54 @@ def sync(ws_url):
         except: pass
     return changes
 
+# ── Update Checker ────────────────────────────────────────────
+def check_for_update():
+    """Check GitHub releases for a newer version. Returns (has_update, latest_tag, download_url) or (False, None, None)"""
+    try:
+        ctx = ssl.create_default_context()
+        conn = http.client.HTTPSConnection("api.github.com", timeout=10, context=ctx)
+        conn.request("GET", f"/repos/{GITHUB_REPO}/releases/latest",
+                     headers={"User-Agent": f"WPlus/{CURRENT_VERSION}"})
+        resp = conn.getresponse()
+        if resp.status != 200:
+            return False, None, None
+        data = json.loads(resp.read())
+        conn.close()
+
+        latest_tag = data.get("tag_name", "").lstrip("v")
+        if not latest_tag:
+            return False, None, None
+
+        # Compare versions
+        def ver_tuple(v):
+            return tuple(int(x) for x in v.split(".") if x.isdigit())
+
+        if ver_tuple(latest_tag) > ver_tuple(CURRENT_VERSION):
+            # Find the exe/zip download URL
+            dl_url = data.get("html_url", f"https://github.com/{GITHUB_REPO}/releases/latest")
+            for asset in data.get("assets", []):
+                if asset.get("name", "").endswith((".exe", ".zip")):
+                    dl_url = asset.get("browser_download_url", dl_url)
+                    break
+            return True, latest_tag, dl_url
+
+        return False, latest_tag, None
+    except:
+        return False, None, None
+
+def notify_update(latest, url):
+    """Show a Windows notification about the update"""
+    try:
+        import ctypes
+        result = ctypes.windll.user32.MessageBoxW(0,
+            f"WPlus v{latest} is available!\n\n"
+            f"You are running v{CURRENT_VERSION}.\n\n"
+            f"Would you like to download the update?",
+            "WPlus — Update Available", 0x44)  # Yes/No + Info icon
+        if result == 6:  # User clicked Yes
+            os.startfile(url)
+    except: pass
+
 # ── Tray Icon Creation ───────────────────────────────────────
 def create_icon():
     # Try to load from assets folder first
@@ -307,14 +358,33 @@ def on_open_data(icon, item):
 def on_open_folder(icon, item):
     os.startfile(EXE_DIR)
 
+def on_check_update(icon, item):
+    has_update, latest, url = check_for_update()
+    if has_update:
+        notify_update(latest, url)
+    else:
+        try:
+            import ctypes
+            ctypes.windll.user32.MessageBoxW(0,
+                f"You're up to date!\n\nRunning WPlus v{CURRENT_VERSION}",
+                "WPlus — No Updates", 0x40)
+        except: pass
+
+def on_github(icon, item):
+    os.startfile(f"https://github.com/{GITHUB_REPO}")
+
 def create_tray():
-    return pystray.Icon("WPlus", create_icon(), "WPlus v2.0 — by KuchiSofts",
+    return pystray.Icon("WPlus", create_icon(), f"WPlus v{CURRENT_VERSION} — by KuchiSofts",
         menu=pystray.Menu(
             pystray.MenuItem(lambda text: f"Status: {state['status']}", None, enabled=False),
+            pystray.MenuItem(lambda text: f"v{CURRENT_VERSION}", None, enabled=False),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Re-inject Plugin", on_reinject),
+            pystray.MenuItem("Check for Updates", on_check_update),
+            pystray.Menu.SEPARATOR,
             pystray.MenuItem("Open Data Folder", on_open_data),
             pystray.MenuItem("Open WPlus Folder", on_open_folder),
+            pystray.MenuItem("GitHub", on_github),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Quit WPlus", on_quit),
         ))
@@ -331,6 +401,17 @@ def service_loop():
         log("File server on port 18733")
     except Exception as e:
         log(f"File server: {e}")
+
+    # Background update check (non-blocking)
+    def bg_update_check():
+        time.sleep(10)  # Wait for app to settle
+        has_update, latest, url = check_for_update()
+        if has_update:
+            log(f"Update available: v{latest}")
+            notify_update(latest, url)
+        else:
+            log(f"Up to date (v{CURRENT_VERSION})")
+    threading.Thread(target=bg_update_check, daemon=True).start()
 
     sync_tick = 0
     while state["running"]:
