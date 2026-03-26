@@ -267,7 +267,8 @@
     var blurCSS={
       blurMessages:'span.selectable-text,[data-pre-plain-text],.copyable-text,._ak8k,.message-in .copyable-text,.message-out .copyable-text{filter:blur(5px)!important;transition:filter .15s!important}span.selectable-text:hover,[data-pre-plain-text]:hover,.copyable-text:hover,._ak8k:hover,.message-in .copyable-text:hover,.message-out .copyable-text:hover{filter:none!important}',
       blurContacts:'span[title][dir],span._ahxt,header span[dir="auto"],header span.x1iyjqo2,[data-testid="conversation-header"] span,[data-testid="cell-frame-title"] span,.message-in span._ahxt,span[aria-label*="Maybe"]{filter:blur(5px)!important;transition:filter .15s!important}span[title][dir]:hover,span._ahxt:hover,header span[dir="auto"]:hover,header span.x1iyjqo2:hover,[data-testid="conversation-header"] span:hover,[data-testid="cell-frame-title"] span:hover,.message-in span._ahxt:hover,span[aria-label*="Maybe"]:hover{filter:none!important}',
-      blurPhotos:'img[draggable="false"],img[src*="pps.whatsapp.net"],img[src*="mmg.whatsapp.net"]{filter:blur(8px)!important;transition:filter .15s!important}img[draggable="false"]:hover,img[src*="pps.whatsapp.net"]:hover,img[src*="mmg.whatsapp.net"]:hover{filter:none!important}'
+      blurPhotos:'img[draggable="false"],img[src*="pps.whatsapp.net"],img[src*="mmg.whatsapp.net"]{filter:blur(8px)!important;transition:filter .15s!important}img[draggable="false"]:hover,img[src*="pps.whatsapp.net"]:hover,img[src*="mmg.whatsapp.net"]:hover{filter:none!important}',
+      blurAvatar:'img[src*="pps.whatsapp.net"],div[data-testid="cell-frame-primary-detail"] img,div[data-testid="chat-row"] img[draggable="false"],header img[draggable="false"],[data-testid="contact-photo"] img,[data-testid="group-info-drawer"] img[draggable="false"],div[role="listitem"] img[draggable="false"],[style*="border-radius: 50%"] img,[style*="border-radius:50%"] img{filter:blur(10px)!important;transition:filter .15s!important}img[src*="pps.whatsapp.net"]:hover,div[data-testid="cell-frame-primary-detail"] img:hover,div[data-testid="chat-row"] img[draggable="false"]:hover,header img[draggable="false"]:hover,[data-testid="contact-photo"] img:hover,[data-testid="group-info-drawer"] img[draggable="false"]:hover,div[role="listitem"] img[draggable="false"]:hover,[style*="border-radius: 50%"] img:hover,[style*="border-radius:50%"] img:hover{filter:none!important}'
     };
     if(blurCSS[id]){
       var styleId='wplus-css-'+id;
@@ -785,7 +786,7 @@
     blurObs={};
 
     // Remove injected CSS
-    ['wplus-css-blurMessages','wplus-css-blurContacts','wplus-css-blurPhotos','wplus-css'].forEach(function(id){var e=document.getElementById(id);if(e)e.remove();});
+    ['wplus-css-blurMessages','wplus-css-blurContacts','wplus-css-blurPhotos','wplus-css-blurAvatar','wplus-css'].forEach(function(id){var e=document.getElementById(id);if(e)e.remove();});
 
     // Restore original WhatsApp functions
     try{var c=findExport("markComposing");if(c&&_comp){c.markComposing=_comp;if(_rec)c.markRecording=_rec;}}catch(e){}
