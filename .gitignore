@@ -29,6 +29,9 @@ _cdp_msg.json
 .vscode/
 .idea/
 
+# Dev notes
+*.private.md
+
 # PyInstaller
 build/
 *.spec
