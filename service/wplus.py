@@ -1,33 +1,110 @@
 #!/usr/bin/env python3
 """
-WPlus v2.0 — WhatsApp Desktop Plugin Service
+WPlus v2.0 — Self-contained WhatsApp Desktop Plugin
 by KuchiSofts — github.com/KuchiSofts
-Single entry point for the exe build — combines tray service + injector + file server
+
+Single exe that contains everything:
+- System tray service
+- CDP injector
+- File server for media
+- engine.js + ui.js (embedded)
+
+On first run, creates data/ folder structure.
 """
-import sys
-import os
+import sys, os, json, http.client, time, subprocess, threading, base64, tempfile
 
-# Set paths relative to exe or script location
+# ── Path Setup ───────────────────────────────────────────────
 if getattr(sys, 'frozen', False):
-    # Running as exe (PyInstaller)
-    BASE_DIR = os.path.dirname(sys.executable)
+    # Running as PyInstaller exe
+    EXE_DIR = os.path.dirname(sys.executable)
+    BUNDLE_DIR = sys._MEIPASS  # PyInstaller temp extraction dir
 else:
-    # Running as script
-    BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    # Running as script — project root is parent of service/
+    EXE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    BUNDLE_DIR = EXE_DIR
 
-# Add service dir to path
-SERVICE_DIR = os.path.join(BASE_DIR, "service") if os.path.exists(os.path.join(BASE_DIR, "service")) else BASE_DIR
-sys.path.insert(0, SERVICE_DIR)
+DATA_DIR = os.path.join(EXE_DIR, "data")
+ASSETS_DIR = os.path.join(EXE_DIR, "assets")
 
-import json, http.client, time, subprocess, threading, base64
+# ── First Run Setup ──────────────────────────────────────────
+def setup():
+    """Create folders and extract bundled files on first run"""
+    for d in ["data", "data/Images", "data/Videos", "data/Sounds", "data/Docs"]:
+        os.makedirs(os.path.join(EXE_DIR, d), exist_ok=True)
+
+    # Extract bundled JS files to exe directory (if not already there or outdated)
+    for filename in ["engine.js", "ui.js"]:
+        src = os.path.join(BUNDLE_DIR, filename)
+        dst = os.path.join(EXE_DIR, filename)
+        if os.path.exists(src):
+            # Always overwrite with bundled version (ensures updates)
+            try:
+                with open(src, "r", encoding="utf-8") as f: content = f.read()
+                with open(dst, "w", encoding="utf-8") as f: f.write(content)
+            except: pass
+
+    # Extract fileserver.py
+    src_fs = os.path.join(BUNDLE_DIR, "fileserver.py")
+    if os.path.exists(src_fs):
+        try:
+            with open(src_fs, "r", encoding="utf-8") as f: content = f.read()
+            # Patch DATA_DIR to point to exe directory
+            content = content.replace(
+                'os.path.dirname(os.path.dirname(os.path.abspath(__file__)))',
+                f'r"{EXE_DIR}"'
+            ).replace(
+                'os.path.dirname(os.path.abspath(__file__))',
+                f'r"{EXE_DIR}"'
+            )
+            dst_fs = os.path.join(EXE_DIR, "_fileserver.py")
+            with open(dst_fs, "w", encoding="utf-8") as f: f.write(content)
+        except: pass
+
+setup()
+
+# ── File Server ──────────────────────────────────────────────
+# Import the extracted fileserver
+sys.path.insert(0, EXE_DIR)
+try:
+    # Try importing the patched version
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("fileserver", os.path.join(EXE_DIR, "_fileserver.py"))
+    if spec and spec.loader:
+        fileserver = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(fileserver)
+        start_file_server = fileserver.start_server
+    else:
+        raise ImportError("No fileserver")
+except:
+    # Fallback: inline minimal file server
+    from http.server import HTTPServer, BaseHTTPRequestHandler
+    class MinHandler(BaseHTTPRequestHandler):
+        def log_message(self, *a): pass
+        def do_OPTIONS(self):
+            self.send_response(200)
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type")
+            self.end_headers()
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Type","application/json")
+            self.send_header("Access-Control-Allow-Origin","*")
+            self.end_headers()
+            self.wfile.write(b"[]")
+        def do_POST(self):
+            self.send_response(200)
+            self.send_header("Content-Type","application/json")
+            self.send_header("Access-Control-Allow-Origin","*")
+            self.end_headers()
+            self.wfile.write(b'{"ok":true}')
+    def start_file_server(port):
+        s = HTTPServer(("127.0.0.1", port), MinHandler)
+        threading.Thread(target=s.serve_forever, daemon=True).start()
+
+# ── Tray Icon ────────────────────────────────────────────────
 from PIL import Image, ImageDraw, ImageFont
 import pystray
-
-DATA_DIR = os.path.join(BASE_DIR, "data")
-os.makedirs(DATA_DIR, exist_ok=True)
-
-# Import file server
-from fileserver import start_server as start_file_server
 
 FILES = {
     "wplus_del": os.path.join(DATA_DIR, "deleted_messages.json"),
@@ -72,7 +149,14 @@ def cdp_eval(ws_url, code):
     with open(p, "w", encoding="utf-8") as f: f.write(cdp)
     try:
         r = subprocess.run(["powershell", "-ExecutionPolicy", "Bypass", "-Command",
-            f'$ws=New-Object System.Net.WebSockets.ClientWebSocket;$ct=[System.Threading.CancellationToken]::None;$ws.ConnectAsync([System.Uri]::new("{ws_url}"),$ct).Wait();$msg=[System.IO.File]::ReadAllText("{p}");$b=[System.Text.Encoding]::UTF8.GetBytes($msg);$ws.SendAsync([System.ArraySegment[byte]]::new($b),[System.Net.WebSockets.WebSocketMessageType]::Text,$true,$ct).Wait();$buf=New-Object byte[] 262144;$ws.ReceiveAsync([System.ArraySegment[byte]]::new($buf),$ct).Wait()|Out-Null;[System.Text.Encoding]::UTF8.GetString($buf).Trim([char]0);$ws.Dispose()'],
+            f'$ws=New-Object System.Net.WebSockets.ClientWebSocket;$ct=[System.Threading.CancellationToken]::None;'
+            f'$ws.ConnectAsync([System.Uri]::new("{ws_url}"),$ct).Wait();'
+            f'$msg=[System.IO.File]::ReadAllText("{p}");'
+            f'$b=[System.Text.Encoding]::UTF8.GetBytes($msg);'
+            f'$ws.SendAsync([System.ArraySegment[byte]]::new($b),[System.Net.WebSockets.WebSocketMessageType]::Text,$true,$ct).Wait();'
+            f'$buf=New-Object byte[] 262144;'
+            f'$ws.ReceiveAsync([System.ArraySegment[byte]]::new($buf),$ct).Wait()|Out-Null;'
+            f'[System.Text.Encoding]::UTF8.GetString($buf).Trim([char]0);$ws.Dispose()'],
             capture_output=True, text=True, timeout=30, creationflags=subprocess.CREATE_NO_WINDOW)
         os.remove(p)
         return json.loads(r.stdout.strip()).get("result", {}).get("result", {}).get("value")
@@ -97,9 +181,8 @@ def inject(ws_url):
         if data and data != "null":
             cdp_eval(ws_url, f'localStorage.setItem("{key}",{json.dumps(data)})')
             restored += 1
-    # Load JS files from project root
-    engine_path = os.path.join(BASE_DIR, "engine.js")
-    ui_path = os.path.join(BASE_DIR, "ui.js")
+    engine_path = os.path.join(EXE_DIR, "engine.js")
+    ui_path = os.path.join(EXE_DIR, "ui.js")
     with open(engine_path, "r", encoding="utf-8") as f: engine = f.read()
     with open(ui_path, "r", encoding="utf-8") as f: ui = f.read()
     result = cdp_eval(ws_url, engine + ";\n" + ui)
@@ -141,14 +224,22 @@ def sync(ws_url):
         except: pass
     return changes
 
-# Tray icon
+# ── Tray Icon Creation ───────────────────────────────────────
 def create_icon():
+    # Try to load from assets folder first
+    ico_path = os.path.join(ASSETS_DIR, "icon-64.png")
+    if os.path.exists(ico_path):
+        try: return Image.open(ico_path)
+        except: pass
+    # Fallback: generate programmatically
     img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
-    draw.rounded_rectangle([8, 4, 56, 56], radius=8, fill="#25D366")
-    try: font = ImageFont.truetype("segoeui.ttf", 22)
-    except: font = ImageFont.load_default()
-    draw.text((14, 14), "W+", fill="white", font=font)
+    # Shield
+    pts = [(12,12),(32,6),(52,12),(52,38),(32,58),(12,38)]
+    draw.polygon(pts, fill="#25D366")
+    # Plus
+    draw.rounded_rectangle([20,28,44,36], radius=2, fill="white")
+    draw.rounded_rectangle([28,20,36,44], radius=2, fill="white")
     return img
 
 def on_quit(icon, item):
@@ -172,7 +263,7 @@ def on_open_data(icon, item):
     os.startfile(DATA_DIR)
 
 def on_open_folder(icon, item):
-    os.startfile(BASE_DIR)
+    os.startfile(EXE_DIR)
 
 def create_tray():
     return pystray.Icon("WPlus", create_icon(), "WPlus v2.0 — by KuchiSofts",
@@ -186,6 +277,7 @@ def create_tray():
             pystray.MenuItem("Quit WPlus", on_quit),
         ))
 
+# ── Service Loop ─────────────────────────────────────────────
 def service_loop():
     with open(STATUS_FILE, "w", encoding="utf-8") as f:
         f.write(f"WPlus Service started {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
@@ -196,7 +288,7 @@ def service_loop():
         start_file_server(18733)
         log("File server on port 18733")
     except Exception as e:
-        log(f"File server error: {e}")
+        log(f"File server: {e}")
 
     sync_tick = 0
     while state["running"]:
@@ -214,20 +306,14 @@ def service_loop():
                     wa = get_wa_target()
                     if wa: break
                     time.sleep(2)
-                if not wa:
-                    log("Connection failed")
-                    time.sleep(5)
-                    continue
+                if not wa: log("Connection failed"); time.sleep(5); continue
                 state["ws_url"] = wa["webSocketDebuggerUrl"]
                 log("Injecting...")
                 ok, restored = inject(state["ws_url"])
                 if ok:
                     state["injected"] = True
                     log(f"Active ({restored} restored)")
-                else:
-                    log("Inject failed")
-                    time.sleep(5)
-                    continue
+                else: log("Inject failed"); time.sleep(5); continue
 
             time.sleep(5)
             sync_tick += 1
@@ -237,16 +323,14 @@ def service_loop():
                     log("WhatsApp closed")
                     try: sync(state["ws_url"])
                     except: pass
-                    state["injected"] = False
-                    state["ws_url"] = None
+                    state["injected"] = False; state["ws_url"] = None
                 continue
             state["ws_url"] = wa["webSocketDebuggerUrl"]
             if sync_tick % 12 == 0:
                 alive = cdp_eval(state["ws_url"], 'window.__wplus&&window.__wplus.ready?"yes":"no"')
                 if alive != "yes":
                     log("Plugin lost, re-injecting...")
-                    state["injected"] = False
-                    continue
+                    state["injected"] = False; continue
             changes = sync(state["ws_url"])
             if changes > 0: state["syncs"] += changes
         except KeyboardInterrupt: break
@@ -259,6 +343,7 @@ def service_loop():
         except: pass
     log("Service stopped")
 
+# ── Entry Point ──────────────────────────────────────────────
 def main():
     icon = create_tray()
     t = threading.Thread(target=service_loop, daemon=True)
