@@ -466,8 +466,39 @@ def service_loop():
         except: pass
     log("Service stopped")
 
+# ── Single Instance ──────────────────────────────────────────
+def kill_old_instances():
+    """Kill any existing WPlus.exe processes (except current)"""
+    my_pid = os.getpid()
+    try:
+        r = subprocess.run(["powershell", "-Command",
+            f"Get-Process -Name 'WPlus' -ErrorAction SilentlyContinue | "
+            f"Where-Object {{ $_.Id -ne {my_pid} }} | "
+            f"ForEach-Object {{ Stop-Process -Id $_.Id -Force; 'killed:' + $_.Id }}"],
+            capture_output=True, text=True, timeout=10,
+            creationflags=subprocess.CREATE_NO_WINDOW)
+        killed = [l for l in r.stdout.strip().split("\n") if l.startswith("killed:")]
+        if killed:
+            time.sleep(1)  # Wait for old process to fully exit
+            return len(killed)
+    except: pass
+    # Also kill pythonw running wplus_service
+    try:
+        subprocess.run(["powershell", "-Command",
+            f"Get-Process -Name 'pythonw' -ErrorAction SilentlyContinue | "
+            f"Where-Object {{ $_.Id -ne {my_pid} }} | Stop-Process -Force"],
+            capture_output=True, text=True, timeout=5,
+            creationflags=subprocess.CREATE_NO_WINDOW)
+    except: pass
+    return 0
+
 # ── Entry Point ──────────────────────────────────────────────
 def main():
+    # Kill any existing WPlus instances
+    killed = kill_old_instances()
+    if killed:
+        log(f"Replaced {killed} old instance(s)")
+
     icon = create_tray()
     t = threading.Thread(target=service_loop, daemon=True)
     t.start()
