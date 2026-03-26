@@ -171,6 +171,16 @@
     '<div class="wpp-ft"><a href="https://github.com/KuchiSofts/WPlus" target="_blank">WPlus v2.0 by KuchiSofts</a></div>';
   document.body.appendChild(P);
 
+  // UI debug logger — logs to engine's debug system
+  function uiLog(action,data){
+    if(W.debug&&W.debug.isEnabled&&W.debug.isEnabled()){
+      var entry={t:Date.now(),ts:new Date().toLocaleTimeString(),cat:'ui',msg:action};
+      if(data)entry.data=typeof data==='object'?JSON.stringify(data).substring(0,300):String(data);
+      try{var log=JSON.parse(localStorage.getItem('wplus_log')||'[]');log.push(entry);if(log.length>500)log=log.slice(-500);localStorage.setItem('wplus_log',JSON.stringify(log));}catch(e){}
+      console.log('[WPlus:ui] '+action+(data?' | '+entry.data:''));
+    }
+  }
+
   function open(){P.classList.add('open');btn.classList.add('on');refresh();}
   function close(){P.classList.remove('open');btn.classList.remove('on');}
   function closeAll(){P.querySelectorAll('.wpp-sub.open').forEach(function(e){e.classList.remove('open');});}
@@ -180,8 +190,8 @@
     var c=document.getElementById('wplus-c');if(c){c.textContent=d;c.style.display=d>0?'':'none';}
   }
 
-  btn.onclick=function(e){e.stopPropagation();P.classList.contains('open')?close():open();};
-  document.getElementById('wp-x').onclick=close;
+  btn.onclick=function(e){e.stopPropagation();var isOpen=P.classList.contains('open');isOpen?close():open();uiLog(isOpen?'Panel CLOSED':'Panel OPENED');};
+  document.getElementById('wp-x').onclick=function(){close();uiLog('Panel closed (back)');};
   document.addEventListener('click',function(e){
     if(!P.classList.contains('open'))return;
     if(P.contains(e.target)||btn.contains(e.target))return;
@@ -191,9 +201,9 @@
   });
   window.addEventListener('wplus-update',refresh);
 
-  P.querySelectorAll('.wpp-tg').forEach(function(el){el.onclick=function(e){e.stopPropagation();var id=this.dataset.t,on=!this.classList.contains('on');this.classList.toggle('on');setCfg(id,on);if(W.applyToggle)W.applyToggle(id,on);localStorage.setItem('wplus_sync_now','1');};});
+  P.querySelectorAll('.wpp-tg').forEach(function(el){el.onclick=function(e){e.stopPropagation();var id=this.dataset.t,on=!this.classList.contains('on');this.classList.toggle('on');setCfg(id,on);if(W.applyToggle)W.applyToggle(id,on);localStorage.setItem('wplus_sync_now','1');uiLog('Toggle: '+id+' → '+(on?'ON':'OFF'));};});
 
-  P.querySelector('[data-a="del"]').onclick=function(){var el=document.getElementById('wp-dl');if(el.classList.contains('open')){el.classList.remove('open');return;}closeAll();
+  P.querySelector('[data-a="del"]').onclick=function(){var el=document.getElementById('wp-dl');if(el.classList.contains('open')){el.classList.remove('open');return;}closeAll();refresh();
     var msgs=W.deletedMsgs?W.deletedMsgs('get'):JSON.parse(localStorage.getItem('wplus_del')||'[]');
     if(!msgs.length){el.innerHTML='<div class="wpp-dme">No deleted messages yet</div>';el.classList.add('open');return;}
     var h='';msgs.slice().reverse().forEach(function(m,idx){
@@ -231,7 +241,8 @@
         var m=allMsgs.slice().reverse()[idx];
         if(!m)return;
 
-        // Always open in chat bubble preview — media viewer opens from inside it
+        // Log and open preview
+        uiLog('Saved msg clicked',{idx:idx,id:(m.id||'?').substring(0,40),type:m.type,sender:(m.sender||'?').split('@')[0],chat:m.chat||'?',time:m.time?new Date(m.time).toLocaleString():'?',bodyLen:(m.body||'').length,hasMedia:!!(m.media||m.mediaFile),mediaFile:m.mediaFile||''});
         showPreview(m);
       };
     });
@@ -241,11 +252,15 @@
       btn.onclick=function(e){
         e.stopPropagation();
         var id=this.dataset.nav;
+        uiLog('Go to chat clicked',{id:id.substring(0,50)});
         if(W.goToMessage){
           this.textContent='\u{23F3}';
           var self=this;
-          W.goToMessage(id);
+          var ok=W.goToMessage(id);
+          uiLog('goToMessage returned: '+ok);
           setTimeout(function(){self.textContent='\u{2192}';},5000);
+        } else {
+          uiLog('goToMessage not available');
         }
       };
     });
@@ -253,9 +268,9 @@
     el.classList.add('open');
   };
 
-  P.querySelector('[data-a="del-clear"]').onclick=function(){var c=delC();if(!c)return;if(confirm('Delete '+c+' saved messages?')){if(W.deletedMsgs)W.deletedMsgs('clear');else localStorage.removeItem('wplus_del');document.getElementById('wp-dl').classList.remove('open');refresh();}};
+  P.querySelector('[data-a="del-clear"]').onclick=function(){var c=delC();if(!c)return;uiLog('Clear history clicked',{count:c});if(confirm('Delete '+c+' saved messages?')){if(W.deletedMsgs)W.deletedMsgs('clear');else localStorage.removeItem('wplus_del');document.getElementById('wp-dl').classList.remove('open');refresh();uiLog('History cleared');}};
 
-  P.querySelector('[data-a="export"]').onclick=function(){if(W.exportContacts)W.exportContacts();else alert('Loading...');};
+  P.querySelector('[data-a="export"]').onclick=function(){uiLog('Export contacts clicked');if(W.exportContacts)W.exportContacts();else alert('Loading...');};
 
   P.querySelector('[data-a="stats"]').onclick=function(){var el=document.getElementById('wp-sp');if(el.classList.contains('open')){el.classList.remove('open');return;}closeAll();
     el.innerHTML='<div class="wpp-st">'+H(W.chatStats?W.chatStats():'Loading...')+'</div>';el.classList.add('open');};
@@ -332,6 +347,8 @@
 
     var sender=m.sender?(m.sender+'').split('@')[0]:'Unknown';
     var time=new Date(m.time).toLocaleString();
+
+    uiLog('Preview opened',{type:m.type,sender:sender,time:time,id:(m.id||'?').substring(0,40),hasMedia:!!(m.media||m.mediaFile),bodyLen:(m.body||'').length,chat:m.chat||'?'});
     var hasMedia=!!m.media;
     var typeIcon={image:'\u{1F4F7}',video:'\u{1F3AC}',ptt:'\u{1F3A4}',audio:'\u{1F3B5}',sticker:'\u{1F3A8}'}[m.type]||'';
 
@@ -469,6 +486,7 @@
 
   // ── Fullscreen Media Viewer (image zoom + video player) ──
   function openMediaViewer(dataUrl,type,sender,time){
+    uiLog('Media viewer opened',{type:type,sender:sender,srcLen:dataUrl?dataUrl.length:0,isBlob:dataUrl?dataUrl.indexOf('blob:')===0:false,isData:dataUrl?dataUrl.indexOf('data:')===0:false,isHttp:dataUrl?dataUrl.indexOf('http')===0:false});
     var oldViewer=document.getElementById('wplus-media-viewer');
     if(oldViewer)oldViewer.remove();
 

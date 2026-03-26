@@ -17,7 +17,7 @@
   function dbg(category, msg, data){
     if(!debugEnabled)return;
     var entry={t:Date.now(),ts:new Date().toLocaleTimeString(),cat:category,msg:msg};
-    if(data!==undefined)entry.data=typeof data==='object'?JSON.stringify(data).substring(0,200):String(data);
+    if(data!==undefined)entry.data=typeof data==='object'?JSON.stringify(data).substring(0,2000):String(data).substring(0,2000);
     debugLog.push(entry);
     if(debugLog.length>MAX_LOG)debugLog=debugLog.slice(-MAX_LOG);
     // Batch save — only write to localStorage every 5 seconds max
@@ -162,8 +162,8 @@
       if(ok.indexOf(msg.__x_type)===-1)return;
 
       // Full message details for debug
-      var msgId=msg.__x_id?msg.__x_id._serialized:'?';
-      var sender=msg.__x_from?msg.__x_from._serialized:'?';
+      var msgId=(msg.__x_id&&msg.__x_id._serialized)?msg.__x_id._serialized:'?';
+      var sender=(msg.__x_from&&msg.__x_from._serialized)?msg.__x_from._serialized:'?';
       var senderName='';
       try{if(msg.__x_from&&CON){var c=CON.get?CON.get(sender):null;if(c)senderName=c.__x_name||c.__x_pushname||'';}}catch(e){}
       var hasMedia=!!(msg.__x_mediaData&&msg.__x_mediaData.mediaBlob);
@@ -327,16 +327,56 @@
     if(id==='playAudioPrivate'){var pl=findExport("markPlayed");if(pl&&_played){if(on){pl.markPlayed=function(){};dbg('toggle','Audio play status hidden');}else{pl.markPlayed=_played;dbg('toggle','Audio play status restored');}}else dbg('toggle','markPlayed not available');}
     // Blur: inject/remove <style> tags — CSS auto-applies to all elements including new ones
     var blurCSS={
-      blurMessages:'span.selectable-text,[data-pre-plain-text],.copyable-text,._ak8k,.message-in .copyable-text,.message-out .copyable-text{filter:blur(5px)!important;transition:filter .15s!important}span.selectable-text:hover,[data-pre-plain-text]:hover,.copyable-text:hover,._ak8k:hover,.message-in .copyable-text:hover,.message-out .copyable-text:hover{filter:none!important}',
-      blurContacts:'span[title][dir],span._ahxt,header span[dir="auto"],header span.x1iyjqo2,[data-testid="conversation-header"] span,[data-testid="cell-frame-title"] span,.message-in span._ahxt,span[aria-label*="Maybe"]{filter:blur(5px)!important;transition:filter .15s!important}span[title][dir]:hover,span._ahxt:hover,header span[dir="auto"]:hover,header span.x1iyjqo2:hover,[data-testid="conversation-header"] span:hover,[data-testid="cell-frame-title"] span:hover,.message-in span._ahxt:hover,span[aria-label*="Maybe"]:hover{filter:none!important}',
-      blurPhotos:'img[src^="blob:"][draggable="false"]:not([style*="border-radius"]),img[src^="data:image"][draggable="false"]:not([style*="border-radius"]){filter:blur(8px)!important;transition:filter .15s!important}img[src^="blob:"][draggable="false"]:not([style*="border-radius"]):hover,img[src^="data:image"][draggable="false"]:not([style*="border-radius"]):hover{filter:none!important}',
-      blurAvatar:'img[src*=".whatsapp.net/v/t61"]{filter:blur(10px)!important;transition:filter .15s!important}img[src*=".whatsapp.net/v/t61"]:hover{filter:none!important}'
+      blurMessages:[
+        // Message text in bubbles (chat area only)
+        '.message-in .copyable-text','.message-out .copyable-text',
+        // Chat list message preview text
+        '._ak8k',
+        // Media in messages (blob images >80px = photos, NOT emojis/reactions)
+        '.message-in img[src^="blob:"]','.message-out img[src^="blob:"]',
+        '.message-in img[src^="data:image/jpeg"]','.message-out img[src^="data:image/jpeg"]',
+        '.message-in video','.message-out video'
+      ],
+      blurContacts:[
+        // Contact names in chat list
+        'span[title][dir]',
+        // Sender names in group messages (colored)
+        'span._ahxt',
+        // Chat header name
+        'header span[dir="auto"]','header span.x1iyjqo2',
+        // Contact/group info
+        '[data-testid="conversation-header"] span','[data-testid="cell-frame-title"] span',
+        // Maybe contacts
+        'span[aria-label*="Maybe"]'
+      ],
+      blurPhotos:[
+        // ONLY large media images in messages (>80px blob/data, NOT round avatars, NOT emojis)
+        'img[src^="blob:"]:not([src*="whatsapp.net"])',
+        'img[src^="data:image/jpeg"]',
+        'img[src^="data:image/png"]'
+      ],
+      blurAvatar:[
+        // ONLY WhatsApp CDN profile pictures (avatars)
+        'img[src*=".whatsapp.net/v/t61"]',
+        'img[src*="pps.whatsapp.net"]'
+      ]
     };
-    if(blurCSS[id]){
+    // Build CSS — add blur + hover-reveal, exclude tiny images (<25px = emojis/reactions/icons)
+    var _builtCSS={};
+    Object.keys(blurCSS).forEach(function(id){
+      var sels=blurCSS[id];
+      var blurPx=id==='blurAvatar'?'10':id==='blurPhotos'?'8':'5';
+      // For photos: add min-width/height filter to exclude emojis and reaction images
+      var extraFilter=id==='blurPhotos'?':not([width="17"]):not([height="17"]):not([width="20"]):not([height="20"])':'';
+      var sel=sels.map(function(s){return s+extraFilter;}).join(',');
+      var hov=sels.map(function(s){return s+extraFilter+':hover';}).join(',');
+      _builtCSS[id]=sel+'{filter:blur('+blurPx+'px)!important;transition:filter .15s!important}'+hov+'{filter:none!important}';
+    });
+    if(_builtCSS[id]){
       var styleId='wplus-css-'+id;
       var existing=document.getElementById(styleId);
-      if(on&&!existing){var s=document.createElement('style');s.id=styleId;s.textContent=blurCSS[id];document.head.appendChild(s);}
-      else if(!on&&existing){existing.remove();}
+      if(on&&!existing){var s=document.createElement('style');s.id=styleId;s.textContent=_builtCSS[id];document.head.appendChild(s);dbg('toggle','CSS injected: '+id+' ('+blurCSS[id].length+' selectors)');}
+      else if(!on&&existing){existing.remove();dbg('toggle','CSS removed: '+id);}
     }
   }
 
