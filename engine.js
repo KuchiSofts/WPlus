@@ -185,9 +185,11 @@
         caption:hasCaption?(msg.__x_caption||'').substring(0,50):'',
         isViewOnce:isViewOnce,
         timestamp:timestamp,
-        isForwarded:!!msg.__x_isForwarded,
-        isStarred:!!msg.__x_star,
-        quotedMsgId:msg.__x_quotedMsg?msg.__x_quotedMsg.__x_id._serialized.substring(0,30):''
+        forwardCount:msg.__x_forwardingScore||0,
+        isStarred:msg.__x_star===true,
+        quotedMsgId:msg.__x_quotedMsg&&msg.__x_quotedMsg.__x_id?msg.__x_quotedMsg.__x_id._serialized.substring(0,30):'',
+        isGroupMsg:!!(chat.id&&chat.id.server==='g.us'),
+        msgTimestamp:msg.__x_t||0
       });
 
       // Backup
