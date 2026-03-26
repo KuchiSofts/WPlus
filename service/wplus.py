@@ -210,13 +210,45 @@ def cdp_eval(ws_url, code):
         except: pass
         return None
 
-def is_wa_running():
+# ── Fast WhatsApp Detection ──────────────────────────────────
+_last_wa_pid = None
+
+def _find_wa_process():
+    """Fast WhatsApp process detection using tasklist (much faster than PowerShell)"""
     try:
-        r = subprocess.run(["powershell", "-Command",
-            "Get-Process -Name 'WhatsApp*' -ErrorAction SilentlyContinue | Select-Object -First 1 | ForEach-Object { 'yes' }"],
+        r = subprocess.run(["tasklist", "/FI", "IMAGENAME eq WhatsApp.Root.exe", "/FO", "CSV", "/NH"],
             capture_output=True, text=True, timeout=5, creationflags=subprocess.CREATE_NO_WINDOW)
-        return "yes" in r.stdout
-    except: return False
+        for line in r.stdout.strip().split("\n"):
+            if "WhatsApp" in line:
+                parts = line.strip('"').split('","')
+                if len(parts) >= 2:
+                    try: return int(parts[1].strip('"'))
+                    except: return -1
+        return 0
+    except:
+        return 0
+
+def is_wa_running():
+    return _find_wa_process() > 0
+
+def detect_wa_change():
+    """Detect if WhatsApp restarted (new PID). Returns: 'same', 'started', 'stopped', 'restarted'"""
+    global _last_wa_pid
+    pid = _find_wa_process()
+
+    if pid > 0 and _last_wa_pid is None:
+        _last_wa_pid = pid
+        return "started"
+    elif pid > 0 and _last_wa_pid and pid != _last_wa_pid:
+        _last_wa_pid = pid
+        return "restarted"
+    elif pid == 0 and _last_wa_pid:
+        _last_wa_pid = None
+        return "stopped"
+    elif pid > 0:
+        return "same"
+    else:
+        return "stopped"
 
 def inject(ws_url):
     cdp_eval(ws_url, 'if(window.__wplus&&window.__wplus.cleanup)window.__wplus.cleanup()')
@@ -373,6 +405,14 @@ def on_check_update(icon, item):
 def on_github(icon, item):
     os.startfile(f"https://github.com/{GITHUB_REPO}")
 
+def on_toggle_startup(icon, item):
+    enabled = is_startup_enabled()
+    if set_startup(not enabled):
+        log(f"Startup {'disabled' if enabled else 'enabled'}")
+
+def startup_checked(item):
+    return is_startup_enabled()
+
 def create_tray():
     return pystray.Icon("WPlus", create_icon(), f"WPlus v{CURRENT_VERSION} — by KuchiSofts",
         menu=pystray.Menu(
@@ -381,6 +421,7 @@ def create_tray():
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Re-inject Plugin", on_reinject),
             pystray.MenuItem("Check for Updates", on_check_update),
+            pystray.MenuItem("Run at Startup", on_toggle_startup, checked=startup_checked),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Open Data Folder", on_open_data),
             pystray.MenuItem("Open WPlus Folder", on_open_folder),
@@ -413,49 +454,98 @@ def service_loop():
             log(f"Up to date (v{CURRENT_VERSION})")
     threading.Thread(target=bg_update_check, daemon=True).start()
 
+    # Initialize WhatsApp detection state
+    if is_wa_running():
+        log("WhatsApp already running")
+        _find_wa_process()  # Set initial PID
+        detect_wa_change()  # Initialize state
+    else:
+        log("Waiting for WhatsApp...")
+
     sync_tick = 0
+
+    def do_inject():
+        """Connect to WhatsApp debug port and inject plugin"""
+        log("Connecting...")
+        wa = None
+        for _ in range(20):
+            if not state["running"]: return False
+            wa = get_wa_target()
+            if wa: break
+            time.sleep(2)
+        if not wa:
+            log("No debug port — restart WhatsApp")
+            return False
+        state["ws_url"] = wa["webSocketDebuggerUrl"]
+        log("Injecting...")
+        ok, restored = inject(state["ws_url"])
+        if ok:
+            state["injected"] = True
+            log(f"Active ({restored} restored)")
+            return True
+        else:
+            log("Inject failed")
+            return False
+
     while state["running"]:
         try:
-            if not state["injected"]:
-                log("Waiting for WhatsApp...")
-                while state["running"] and not is_wa_running():
-                    time.sleep(3)
-                if not state["running"]: break
-                log("Connecting...")
-                time.sleep(8)
-                wa = None
-                for _ in range(20):
-                    if not state["running"]: break
-                    wa = get_wa_target()
-                    if wa: break
-                    time.sleep(2)
-                if not wa: log("Connection failed"); time.sleep(5); continue
-                state["ws_url"] = wa["webSocketDebuggerUrl"]
-                log("Injecting...")
-                ok, restored = inject(state["ws_url"])
-                if ok:
-                    state["injected"] = True
-                    log(f"Active ({restored} restored)")
-                else: log("Inject failed"); time.sleep(5); continue
-
-            time.sleep(5)
+            time.sleep(3)
             sync_tick += 1
-            wa = get_wa_target()
-            if not wa:
+
+            # ── Detect WhatsApp lifecycle ─────────────────
+            change = detect_wa_change()
+
+            if change == "stopped":
                 if state["injected"]:
-                    log("WhatsApp closed")
+                    log("WhatsApp closed — saving data")
                     try: sync(state["ws_url"])
                     except: pass
-                    state["injected"] = False; state["ws_url"] = None
+                    state["injected"] = False
+                    state["ws_url"] = None
                 continue
-            state["ws_url"] = wa["webSocketDebuggerUrl"]
-            if sync_tick % 12 == 0:
+
+            if change == "started":
+                log("WhatsApp started — waiting for WebView2...")
+                time.sleep(8)  # Wait for WebView2 to initialize
+                do_inject()
+                continue
+
+            if change == "restarted":
+                log("WhatsApp restarted — re-injecting...")
+                state["injected"] = False
+                state["ws_url"] = None
+                time.sleep(8)
+                do_inject()
+                continue
+
+            # ── WhatsApp is running (change == "same") ────
+            if not state["injected"]:
+                # Not yet injected — try now
+                if not do_inject():
+                    time.sleep(5)
+                continue
+
+            # ── Check plugin alive (every 60s) ────────────
+            if sync_tick % 20 == 0:
+                wa = get_wa_target()
+                if not wa:
+                    log("Debug port lost")
+                    state["injected"] = False
+                    state["ws_url"] = None
+                    continue
+                state["ws_url"] = wa["webSocketDebuggerUrl"]
                 alive = cdp_eval(state["ws_url"], 'window.__wplus&&window.__wplus.ready?"yes":"no"')
                 if alive != "yes":
-                    log("Plugin lost, re-injecting...")
-                    state["injected"] = False; continue
-            changes = sync(state["ws_url"])
-            if changes > 0: state["syncs"] += changes
+                    log("Plugin lost (page reload?) — re-injecting...")
+                    state["injected"] = False
+                    continue
+
+            # ── Sync data ─────────────────────────────────
+            if sync_tick % 2 == 0:  # Every 6 seconds
+                changes = sync(state["ws_url"])
+                if changes > 0:
+                    state["syncs"] += changes
+
         except KeyboardInterrupt: break
         except: time.sleep(5)
 
@@ -465,6 +555,35 @@ def service_loop():
         try: uninject(state["ws_url"])
         except: pass
     log("Service stopped")
+
+# ── Run at Startup ────────────────────────────────────────────
+STARTUP_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+STARTUP_NAME = "WPlus"
+
+def is_startup_enabled():
+    import winreg
+    try:
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, STARTUP_KEY, 0, winreg.KEY_READ)
+        val, _ = winreg.QueryValueEx(key, STARTUP_NAME)
+        winreg.CloseKey(key)
+        return bool(val)
+    except:
+        return False
+
+def set_startup(enable):
+    import winreg
+    try:
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, STARTUP_KEY, 0, winreg.KEY_WRITE)
+        if enable:
+            exe_path = sys.executable if getattr(sys, 'frozen', False) else os.path.abspath(__file__)
+            winreg.SetValueEx(key, STARTUP_NAME, 0, winreg.REG_SZ, f'"{exe_path}"')
+        else:
+            try: winreg.DeleteValue(key, STARTUP_NAME)
+            except: pass
+        winreg.CloseKey(key)
+        return True
+    except:
+        return False
 
 # ── Single Instance ──────────────────────────────────────────
 def kill_old_instances():
