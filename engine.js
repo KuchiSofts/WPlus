@@ -150,45 +150,98 @@
     }catch(e){dbg('restore','Error: '+e.message);}
   }
 
+  var _hookCount=0;
   function hookChat(chat){
     if(!chat||!chat.msgs||chat.msgs.__wp)return;chat.msgs.__wp=true;
+    _hookCount++;
     var chatName=chat.__x_name||chat.__x_formattedTitle||(chat.id?chat.id.user:'?');
 
     chat.msgs.on('add',function(msg){try{
       if(!msg||!msg.isNewMsg||(msg.id&&msg.id.fromMe))return;
       var ok=['chat','image','video','ptt','audio','document','sticker','vcard','location'];
       if(ok.indexOf(msg.__x_type)===-1)return;
+
+      // Full message details for debug
+      var msgId=msg.__x_id?msg.__x_id._serialized:'?';
+      var sender=msg.__x_from?msg.__x_from._serialized:'?';
+      var senderName='';
+      try{if(msg.__x_from&&CON){var c=CON.get?CON.get(sender):null;if(c)senderName=c.__x_name||c.__x_pushname||'';}}catch(e){}
+      var hasMedia=!!(msg.__x_mediaData&&msg.__x_mediaData.mediaBlob);
+      var hasCaption=!!(msg.__x_caption&&msg.__x_caption.length>0);
+      var bodyLen=(msg.__x_body||'').length;
+      var isViewOnce=!!(msg.__x_isViewOnce||msg.__x_viewOnce);
+      var timestamp=msg.__x_t?new Date(msg.__x_t*1000).toLocaleString():'?';
+
+      dbg('msg:new','NEW MESSAGE',{
+        id:msgId.substring(0,50),
+        type:msg.__x_type,
+        chat:chatName,
+        sender:sender.split('@')[0],
+        senderName:senderName,
+        bodyLength:bodyLen,
+        bodyPreview:(msg.__x_body||'').substring(0,50).replace(/[\n\r]/g,' '),
+        hasMedia:hasMedia,
+        hasCaption:hasCaption,
+        caption:hasCaption?(msg.__x_caption||'').substring(0,50):'',
+        isViewOnce:isViewOnce,
+        timestamp:timestamp,
+        isForwarded:!!msg.__x_isForwarded,
+        isStarred:!!msg.__x_star,
+        quotedMsgId:msg.__x_quotedMsg?msg.__x_quotedMsg.__x_id._serialized.substring(0,30):''
+      });
+
+      // Backup
       msg.__x_backupBody=msg.__x_body;msg.__x_backupText=msg.__x_text;msg.__x_backupType=msg.__x_type;
       msg.__x_backupCaption=msg.__x_caption;msg.__x_backupMediaData=msg.__x_mediaData;
-      msg.__x_backupTime=Date.now();msg.__x_backupSender=msg.__x_from?msg.__x_from._serialized:'';
+      msg.__x_backupTime=Date.now();msg.__x_backupSender=sender;
 
-      // Save to file server (new_messages.json + media files)
-      var entry={id:msg.__x_id._serialized,type:msg.__x_type,body:msg.__x_body||'',text:msg.__x_text||'',
-        caption:msg.__x_caption||'',sender:msg.__x_backupSender,time:Date.now(),chat:chatName};
+      // Save to file server
+      var entry={id:msgId,type:msg.__x_type,body:msg.__x_body||'',text:msg.__x_text||'',
+        caption:msg.__x_caption||'',sender:sender,time:Date.now(),chat:chatName};
 
-      // Try to capture media blob as base64
       var md=msg.__x_mediaData;
       if(md&&md.mediaBlob&&md.mediaBlob._blob){
         var blob=md.mediaBlob._blob;
+        dbg('msg:new','Media blob captured: '+blob.type+' ('+Math.round(blob.size/1024)+'KB)');
         var reader=new FileReader();
         reader.onload=function(){entry.media=reader.result;serverPost('/msg/new',entry);};
         reader.readAsDataURL(blob);
       } else {
         serverPost('/msg/new',entry);
+        if(hasMedia)dbg('msg:new','Media blob NOT available (will try later)');
       }
 
-      dbg('msg','Backed up: '+msg.__x_type+' in '+chatName);
-      if(msg.__x_isViewOnce||msg.__x_viewOnce)captureViewOnce(msg);
-    }catch(e){dbg('msg','Backup error',e.message);}});
+      if(isViewOnce){dbg('msg:new','VIEW-ONCE detected! Capturing...');captureViewOnce(msg);}
+    }catch(e){dbg('msg:new','ERROR: '+e.message);}});
 
     chat.msgs.on('change',function(msg){try{
       if(!msg||msg.__x_type!=='revoked'||!msg.__x_backupType)return;
-      var entry={id:msg.__x_id._serialized,type:msg.__x_backupType,body:msg.__x_backupBody,
-        text:msg.__x_backupText,caption:msg.__x_backupCaption,sender:msg.__x_backupSender,
+
+      var msgId=msg.__x_id?msg.__x_id._serialized:'?';
+      var sender=msg.__x_backupSender||'?';
+      var timeSinceBackup=Date.now()-(msg.__x_backupTime||Date.now());
+      var hasBackupMedia=!!(msg.__x_backupMediaData&&msg.__x_backupMediaData.mediaBlob);
+
+      dbg('msg:del','MESSAGE DELETED',{
+        id:msgId.substring(0,50),
+        originalType:msg.__x_backupType,
+        chat:chatName,
+        sender:sender.split('@')[0],
+        bodyPreview:(msg.__x_backupBody||msg.__x_backupText||'').substring(0,60).replace(/[\n\r]/g,' '),
+        bodyLength:(msg.__x_backupBody||'').length,
+        hasCaption:!!(msg.__x_backupCaption),
+        caption:(msg.__x_backupCaption||'').substring(0,40),
+        hasMediaBackup:hasBackupMedia,
+        timeSinceReceived:Math.round(timeSinceBackup/1000)+'s',
+        backupTime:msg.__x_backupTime?new Date(msg.__x_backupTime).toLocaleString():'?'
+      });
+
+      var entry={id:msgId,type:msg.__x_backupType,body:msg.__x_backupBody,
+        text:msg.__x_backupText,caption:msg.__x_backupCaption,sender:sender,
         time:msg.__x_backupTime||Date.now(),chat:chatName,media:null};
 
-      // Notify file server — move from new_messages to deleted_messages + save media
       serverPost('/msg/deleted',entry);
+      dbg('msg:del','Sent to file server for permanent storage');
 
       // Try to capture media blob for images/videos/audio
       var mediaTypes=['image','video','ptt','audio','sticker'];
@@ -197,22 +250,30 @@
           var md=msg.__x_backupMediaData||msg.__x_mediaData;
           if(md&&md.mediaBlob&&md.mediaBlob._blob){
             var blob=md.mediaBlob._blob;
+            dbg('msg:del','Media blob found: '+blob.type+' ('+Math.round(blob.size/1024)+'KB)');
             var reader=new FileReader();
             reader.onload=function(){
               entry.media=reader.result;entry.mime=blob.type;
-              // Update in storage
+              dbg('msg:del','Media captured as base64 ('+Math.round(reader.result.length/1024)+'KB)');
               var d=deletedMsgs('get');
               for(var i=d.length-1;i>=0;i--){if(d[i].id===entry.id){d[i].media=entry.media;d[i].mime=entry.mime;break;}}
               LS.set('wplus_del',d);
+              serverPost('/msg/deleted',entry);
+              dbg('msg:del','Media sent to file server');
             };
             reader.readAsDataURL(blob);
+          } else {
+            dbg('msg:del','No media blob available for '+msg.__x_backupType+' message');
           }
-        }catch(e){}
+        }catch(e){dbg('msg:del','Media capture error: '+e.message);}
       }
 
       deletedMsgs('add',entry);
-      restoreMsg(msg);fire('update');
-    }catch(e){}});
+      dbg('msg:del','Saved to localStorage ('+deletedMsgs('get').length+' total)');
+      restoreMsg(msg);
+      dbg('msg:del','Message restored in chat UI');
+      fire('update');
+    }catch(e){dbg('msg:del','HANDLER ERROR: '+e.message);}});
   }
 
   // ── View-once capture ─────────────────────────────────────
@@ -259,10 +320,11 @@
 
   // ── Toggle features ───────────────────────────────────────
   function applyToggle(id,on){
-    if(id==='hideTyping'){var c=findExport("markComposing");if(c&&_comp){if(on){c.markComposing=function(){};c.markRecording=function(){};}else{c.markComposing=_comp;if(_rec)c.markRecording=_rec;}}}
-    if(id==='hideOnline'){var p=findExport("sendPresenceAvailable");if(p&&_pres){if(on){p.sendPresenceAvailable=function(){};if(!presInt){var u=findExport("sendPresenceUnavailable");if(u)presInt=setInterval(function(){try{u.sendPresenceUnavailable();}catch(e){}},1000);}}else{p.sendPresenceAvailable=_pres;if(presInt){clearInterval(presInt);presInt=null;}}}}
-    if(id==='disableReceipts'){var s=findExport("sendConversationSeen");if(s&&_seen){if(on)s.sendConversationSeen=function(){return Promise.resolve();};else s.sendConversationSeen=_seen;}}
-    if(id==='playAudioPrivate'){var pl=findExport("markPlayed");if(pl&&_played){if(on)pl.markPlayed=function(){};else pl.markPlayed=_played;}}
+    dbg('toggle',id+' → '+(on?'ON':'OFF'));
+    if(id==='hideTyping'){var c=findExport("markComposing");if(c&&_comp){if(on){c.markComposing=function(){};c.markRecording=function(){};dbg('toggle','Typing indicator hooked');}else{c.markComposing=_comp;if(_rec)c.markRecording=_rec;dbg('toggle','Typing indicator restored');}}else dbg('toggle','markComposing not available');}
+    if(id==='hideOnline'){var p=findExport("sendPresenceAvailable");if(p&&_pres){if(on){p.sendPresenceAvailable=function(){};if(!presInt){var u=findExport("sendPresenceUnavailable");if(u){presInt=setInterval(function(){try{u.sendPresenceUnavailable();}catch(e){}},1000);dbg('toggle','Presence set to unavailable (1s interval)');}}dbg('toggle','Online status hidden');}else{p.sendPresenceAvailable=_pres;if(presInt){clearInterval(presInt);presInt=null;}dbg('toggle','Online status restored');}}else dbg('toggle','sendPresenceAvailable not available');}
+    if(id==='disableReceipts'){var s=findExport("sendConversationSeen");if(s&&_seen){if(on){s.sendConversationSeen=function(){return Promise.resolve();};dbg('toggle','Read receipts disabled');}else{s.sendConversationSeen=_seen;dbg('toggle','Read receipts restored');}}else dbg('toggle','sendConversationSeen not available');}
+    if(id==='playAudioPrivate'){var pl=findExport("markPlayed");if(pl&&_played){if(on){pl.markPlayed=function(){};dbg('toggle','Audio play status hidden');}else{pl.markPlayed=_played;dbg('toggle','Audio play status restored');}}else dbg('toggle','markPlayed not available');}
     // Blur: inject/remove <style> tags — CSS auto-applies to all elements including new ones
     var blurCSS={
       blurMessages:'span.selectable-text,[data-pre-plain-text],.copyable-text,._ak8k,.message-in .copyable-text,.message-out .copyable-text{filter:blur(5px)!important;transition:filter .15s!important}span.selectable-text:hover,[data-pre-plain-text]:hover,.copyable-text:hover,._ak8k:hover,.message-in .copyable-text:hover,.message-out .copyable-text:hover{filter:none!important}',
