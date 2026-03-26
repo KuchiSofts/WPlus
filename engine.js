@@ -470,15 +470,21 @@
   function findRevokedInChat(chat,saved){
     if(!chat||!chat.msgs||!chat.msgs._models)return null;
     var msgTime=saved.time;
+    var bestMatch=null,bestDiff=Infinity;
     for(var i=0;i<chat.msgs._models.length;i++){
       var m=chat.msgs._models[i];
       if(m.__x_type!=='revoked')continue;
-      var mTime=m.__x_t?m.__x_t*1000:0;
-      // Match by time (within 5 seconds)
-      if(mTime&&msgTime&&Math.abs(mTime-msgTime)<5000)return m;
-      // Or exact ID match (same session)
+      // Exact ID match (same session) — instant return
       if(m.__x_id&&m.__x_id._serialized===saved.id)return m;
+      // Time-based match — find the closest revoked message within 60 seconds
+      var mTime=m.__x_t?m.__x_t*1000:0;
+      if(mTime&&msgTime){
+        var diff=Math.abs(mTime-msgTime);
+        if(diff<60000&&diff<bestDiff){bestDiff=diff;bestMatch=m;}
+      }
     }
+    if(bestMatch)dbg('nav','Time-matched revoked msg (diff: '+Math.round(bestDiff/1000)+'s)');
+    return bestMatch;
     return null;
   }
 
@@ -788,42 +794,58 @@
 
     function getSavedMsgs(){return deletedMsgs('get');}
 
-    function matchSaved(msg){
+    function matchSaved(msg,chatObj){
       if(!msg||!msg.__x_id)return null;
       var savedMsgs=getSavedMsgs();
-      var sender=msg.__x_from?msg.__x_from._serialized:'';
+      var msgId=msg.__x_id._serialized||'';
       var msgTime=msg.__x_t?msg.__x_t*1000:0;
+      var msgChat=chatObj?chatObj.id._serialized:'';
+      var msgChatUser=msgChat.split('@')[0];
+
+      var bestMatch=null, bestScore=0;
 
       for(var i=0;i<savedMsgs.length;i++){
         var s=savedMsgs[i];
         if(restoredSet.has(s.id))continue;
 
-        // Match by chat/sender
-        var savedSender=s.sender||'';
-        var chatJid=msg.__x_id?msg.__x_id._serialized.split('_')[1]||'':'';
-        var savedChat=s.id?s.id.split('_')[1]||'':'';
-        var sameChat=chatJid&&savedChat&&chatJid.split('@')[0]===savedChat.split('@')[0];
-        var sameSender=false;
-        if(sender&&savedSender){
-          sameSender=sender===savedSender||sender.split('@')[0].split('-')[0]===savedSender.split('@')[0].split('-')[0];
-        }
-        if(!sameChat&&!sameSender)continue;
+        var score=0;
 
-        // Match by time (within 2 seconds for precise match)
+        // 1. Exact ID match (same session) — perfect match
+        if(s.id===msgId){score=100;bestMatch=s;bestScore=100;break;}
+
+        // 2. Same chat check (required)
+        var savedChatUser=(s.id||'').split('_')[1]||'';
+        savedChatUser=savedChatUser.split('@')[0];
+        if(!savedChatUser||!msgChatUser||savedChatUser!==msgChatUser)continue;
+        score+=30;  // Same chat
+
+        // 3. Time matching — the closer the better
         if(msgTime&&s.time){
           var diff=Math.abs(msgTime-s.time);
-          if(diff>5000)continue; // More than 5 seconds = different message
+          if(diff<3000)score+=50;       // Within 3 seconds — very likely same message
+          else if(diff<10000)score+=40;  // Within 10 seconds — probable
+          else if(diff<30000)score+=20;  // Within 30 seconds — possible
+          else if(diff<60000)score+=10;  // Within 1 minute — weak match
+          else continue;                 // More than 1 minute — skip
         }
 
-        // Exact ID match (same session)
-        if(s.id===msg.__x_id._serialized){
-          restoredSet.add(s.id);
-          return s;
+        // 4. Same message type bonus
+        if(s.type===msg.__x_type||s.type==='chat')score+=10;
+
+        // 5. Body content match bonus (for text messages)
+        if(s.type==='chat'&&msg.__x_type==='revoked'){
+          // Can't compare body since it's revoked, but type match helps
+          score+=5;
         }
 
-        // Fuzzy match passed
-        restoredSet.add(s.id);
-        return s;
+        if(score>bestScore){bestScore=score;bestMatch=s;}
+      }
+
+      // Require minimum score of 50 (same chat + some time match)
+      if(bestMatch&&bestScore>=50){
+        restoredSet.add(bestMatch.id);
+        dbg('restore','Score '+bestScore+' for '+(bestMatch.type||'?')+': '+(bestMatch.body||bestMatch.text||'?').substring(0,25));
+        return bestMatch;
       }
       return null;
     }
@@ -837,10 +859,10 @@
         if(!ch.msgs||!ch.msgs._models)return;
         ch.msgs._models.forEach(function(m){
           if(m.__x_type!=='revoked')return;
-          var saved=matchSaved(m);
+          var saved=matchSaved(m,ch);
           if(saved&&applyRestore(m,saved)){
             restored++;
-            dbg('restore','Matched: '+(saved.type||'chat')+' | '+(saved.body||saved.text||'?').substring(0,30)+' in '+(ch.__x_name||'?').substring(0,20));
+            dbg('restore','Restored: '+(saved.type||'chat')+' | '+(saved.body||saved.text||'?').substring(0,30)+' in '+(ch.__x_name||'?').substring(0,20));
           }
         });
       });
@@ -854,8 +876,11 @@
       ch.msgs.on('add',function(msg){
         try{
           if(!msg||msg.__x_type!=='revoked')return;
-          var saved=matchSaved(msg);
-          if(saved){applyRestore(msg,saved);dbg('restore','Live: '+(saved.type||'chat'));}
+          var saved=matchSaved(msg,ch);
+          if(saved){
+            applyRestore(msg,saved);
+            dbg('restore','Live restored: '+(saved.type||'chat')+' | '+(saved.body||saved.text||'?').substring(0,30)+' in '+(ch.__x_name||'?').substring(0,20));
+          }
         }catch(e){}
       });
     }
