@@ -107,9 +107,16 @@ class Handler(BaseHTTPRequestHandler):
                     data.pop("media", None)  # Remove base64 from JSON
                     data.pop("body", None) if data.get("mediaFile") else None
                 msgs.append(data)
-                # Clean old (>24h)
-                cutoff = time.time() * 1000 - 86400000
-                msgs = [m for m in msgs if m.get("time", 0) > cutoff]
+                # Clean messages older than 48h (WhatsApp "delete for everyone" window)
+                cutoff = time.time() * 1000 - 172800000  # 48 hours in ms
+                expired = [m for m in msgs if m.get("time", 0) < cutoff]
+                msgs = [m for m in msgs if m.get("time", 0) >= cutoff]
+                # Delete media files for expired messages
+                for exp in expired:
+                    mf = exp.get("mediaFile")
+                    if mf:
+                        try: os.remove(os.path.join(DATA_DIR, mf))
+                        except: pass
                 save_json(NEW_MSGS, msgs)
             self._ok({"saved": True})
             return
@@ -163,6 +170,24 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/settings":
             save_json(SETTINGS, data)
             self._ok({"saved": True})
+            return
+
+        # Cleanup — remove expired new messages + their media
+        if self.path == "/cleanup":
+            cutoff = time.time() * 1000 - 172800000  # 48h
+            msgs = load_json(NEW_MSGS, [])
+            expired = [m for m in msgs if m.get("time", 0) < cutoff]
+            remaining = [m for m in msgs if m.get("time", 0) >= cutoff]
+            cleaned_files = 0
+            for exp in expired:
+                mf = exp.get("mediaFile")
+                if mf:
+                    try:
+                        os.remove(os.path.join(DATA_DIR, mf))
+                        cleaned_files += 1
+                    except: pass
+            save_json(NEW_MSGS, remaining)
+            self._ok({"removed": len(expired), "files": cleaned_files, "remaining": len(remaining)})
             return
 
         self.send_response(404)
