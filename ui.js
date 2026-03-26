@@ -120,6 +120,7 @@
   var P=document.createElement('div');P.className='wpp';P.id='wplus-panel';
   P.innerHTML=
     '<div class="wpp-h"><div class="wpp-hb" id="wp-x">'+I.bk+'</div><div class="wpp-ht">WPlus</div></div>'+
+    '<div id="wplus-update-bar" style="display:none;padding:8px 20px;background:rgba(37,211,102,.1);border-bottom:1px solid rgba(37,211,102,.2);cursor:pointer;font-size:13px;color:#25D366;display:none"><span style="margin-right:6px">\u{2B06}</span><span id="wplus-update-text">Update available</span></div>'+
     '<div class="wpp-sc">'+
 
     '<div class="wpp-sec">Privacy</div>'+
@@ -127,7 +128,9 @@
     '<div class="wpp-div"></div>'+
     T('blurContacts',I.eo,'Blur contacts','Hides names everywhere',cfg('blurContacts'))+
     '<div class="wpp-div"></div>'+
-    T('blurPhotos',I.ph,'Blur photos','Hides profile pictures',cfg('blurPhotos'))+
+    T('blurPhotos',I.ph,'Blur photos','Hides all images',cfg('blurPhotos'))+
+    '<div class="wpp-div"></div>'+
+    T('blurAvatar',I.ph,'Blur avatars','Hides profile pictures everywhere',cfg('blurAvatar'))+
     '<div class="wpp-div"></div>'+
     T('hideTyping',I.lk,'Hide typing','Others can\'t see you type',cfg('hideTyping'))+
     '<div class="wpp-div"></div>'+
@@ -151,7 +154,9 @@
     '<div class="wpp-sub" id="wp-sp"></div>'+
     '<div class="wpp-div"></div>'+
 
-    '<div class="wpp-sec">Debug</div>'+
+    '<div class="wpp-sec">Settings</div>'+
+    T('checkUpdates',I.ch,'Check for updates','Notify when new version available',cfg('checkUpdates')!==false)+
+    '<div class="wpp-div"></div>'+
     T('debugEnabled',I.ch,'Debug logging','Track all WPlus events',cfg('debugEnabled')!==false)+
     '<div class="wpp-div"></div>'+
     R('debug-status',I.ch,'System status','Engine, hooks, storage info','')+
@@ -163,7 +168,7 @@
     R('debug-clear',I.cl,'Clear debug log','','')+
 
     '</div>'+
-    '<div class="wpp-ft"><a href="https://github.com/KuchiSofts" target="_blank">WPlus v1.2 by KuchiSofts</a></div>';
+    '<div class="wpp-ft"><a href="https://github.com/KuchiSofts/WPlus" target="_blank">WPlus v2.0 by KuchiSofts</a></div>';
   document.body.appendChild(P);
 
   function open(){P.classList.add('open');btn.classList.add('on');refresh();}
@@ -592,6 +597,47 @@
 
     document.body.appendChild(viewer);
   }
+
+  // ── Update Check ───────────────────────────────────────
+  var updateUrl=null;
+  function checkForUpdate(){
+    if(cfg('checkUpdates')===false)return;
+    try{
+      fetch('https://api.github.com/repos/KuchiSofts/WPlus/releases/latest',{headers:{'Accept':'application/json'}})
+      .then(function(r){return r.json();})
+      .then(function(data){
+        var latest=(data.tag_name||'').replace(/^v/,'');
+        if(!latest)return;
+        var cur='2.0.0';
+        if(latest.split('.').map(Number).join('.')>cur.split('.').map(Number).join('.')){
+          updateUrl=data.html_url||'https://github.com/KuchiSofts/WPlus/releases/latest';
+          // Show update bar
+          var bar=document.getElementById('wplus-update-bar');
+          if(bar){bar.style.display='block';document.getElementById('wplus-update-text').textContent='Update v'+latest+' available — tap to download';}
+          // Add indicator dot to sidebar icon
+          var dot=document.getElementById('wplus-update-dot');
+          if(!dot){
+            dot=document.createElement('span');dot.id='wplus-update-dot';
+            dot.style.cssText='position:absolute;top:2px;right:2px;width:10px;height:10px;border-radius:50%;background:#ef4444;border:2px solid #222e35';
+            var sideBtn=document.getElementById('wplus-btn');
+            if(sideBtn){sideBtn.style.position='relative';sideBtn.appendChild(dot);}
+          }
+        }
+      }).catch(function(){});
+    }catch(e){}
+  }
+
+  // Update bar click
+  var updateBar=document.getElementById('wplus-update-bar');
+  if(updateBar){
+    updateBar.onclick=function(){
+      if(updateUrl)window.open(updateUrl,'_blank');
+      else window.open('https://github.com/KuchiSofts/WPlus/releases/latest','_blank');
+    };
+  }
+
+  // Check after 15 seconds
+  setTimeout(checkForUpdate,15000);
 
   // ── Sidebar icon positioning ───────────────────────────
   function pos(){var mb=null;document.querySelectorAll('button,[role=button]').forEach(function(e){if(e.getBoundingClientRect().left<60&&(e.title==='Media'||e.ariaLabel==='Media'))mb=e;});
