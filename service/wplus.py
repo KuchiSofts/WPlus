@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-WPlus v2.0 — Self-contained WhatsApp Desktop Plugin
+WPlus — Self-contained WhatsApp Desktop Plugin
 by KuchiSofts — github.com/KuchiSofts
 
 Single exe that contains everything:
@@ -13,7 +13,7 @@ On first run, creates data/ folder structure.
 """
 import sys, os, json, http.client, time, subprocess, threading, base64, tempfile, ssl, secrets
 
-CURRENT_VERSION = "2.0.0"
+CURRENT_VERSION = "2.0.1"  # Keep in sync with engine.js and package.json
 GITHUB_REPO = "KuchiSofts/WPlus"
 
 # ── Path Setup ───────────────────────────────────────────────
@@ -473,6 +473,11 @@ def service_loop():
     # Background update check (non-blocking)
     def bg_update_check():
         time.sleep(10)  # Wait for app to settle
+        try:
+            with open(FILES["wplus_cfg"], "r", encoding="utf-8") as f:
+                if json.load(f).get("checkUpdates") is False:
+                    return  # Turned off in the WPlus panel
+        except (OSError, ValueError, AttributeError): pass
         has_update, latest, url = check_for_update()
         if has_update:
             log(f"Update available: v{latest}")

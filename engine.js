@@ -1,9 +1,9 @@
-// WPlus Engine v1.2 — github.com/KuchiSofts — MIT License
+// WPlus Engine — github.com/KuchiSofts — MIT License
 (function(){
   'use strict';
   // Allow re-injection by cleaning up previous instance
   if(window.__wplus&&window.__wplus.cleanup)try{window.__wplus.cleanup();}catch(e){}
-  window.__wplus={version:'1.2',ready:false};
+  window.__wplus={version:'2.0.1',ready:false};  // Keep in sync with CURRENT_VERSION in service/wplus.py
 
   var MAX_MSGS=1000,hooked=false;
   var CC=null,CON=null,GRP=null;
@@ -981,5 +981,5 @@
   };
 
   setTimeout(boot,3000);
-  dbg('boot','Engine v1.2 loaded');
+  dbg('boot','Engine v'+window.__wplus.version+' loaded');
 })();

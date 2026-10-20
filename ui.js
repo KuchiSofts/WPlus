@@ -1,8 +1,11 @@
-// WPlus UI v1.1 — github.com/KuchiSofts — MIT
+// WPlus UI — github.com/KuchiSofts — MIT
 (function(){
   ['wplus-btn','wplus-panel','wplus-css'].forEach(function(id){var e=document.getElementById(id);if(e)e.remove();});
   var W=window.__wplus||{};
   function cfg(k){try{return(JSON.parse(localStorage.getItem('wplus_cfg')||'{}')||{})[k]||false;}catch(e){return false;}}
+  function cfgRaw(k){try{return(JSON.parse(localStorage.getItem('wplus_cfg')||'{}')||{})[k];}catch(e){return undefined;}}
+  function newerVersion(a,b){var x=String(a).split('.'),y=String(b).split('.');
+    for(var i=0;i<Math.max(x.length,y.length);i++){var p=parseInt(x[i],10)||0,q=parseInt(y[i],10)||0;if(p!==q)return p>q;}return false;}
   function setCfg(k,v){try{var s=JSON.parse(localStorage.getItem('wplus_cfg')||'{}');s[k]=v;localStorage.setItem('wplus_cfg',JSON.stringify(s));}catch(e){}}
   function delC(){try{return(W.deletedMsgs?W.deletedMsgs('get'):JSON.parse(localStorage.getItem('wplus_del')||'[]')).length;}catch(e){return 0;}}
   // Escape text for safe insertion into HTML (element content and quoted attributes)
@@ -158,7 +161,7 @@
     '<div class="wpp-div"></div>'+
 
     '<div class="wpp-sec">Settings</div>'+
-    T('checkUpdates',I.ch,'Check for updates','Notify when new version available',cfg('checkUpdates')!==false)+
+    T('checkUpdates',I.ch,'Check for updates','Asks api.github.com for new releases',cfgRaw('checkUpdates')!==false)+
     '<div class="wpp-div"></div>'+
     T('debugEnabled',I.ch,'Debug logging','Off by default — log may contain message previews',cfg('debugEnabled')===true)+
     '<div class="wpp-div"></div>'+
@@ -171,7 +174,7 @@
     R('debug-clear',I.cl,'Clear debug log','','')+
 
     '</div>'+
-    '<div class="wpp-ft"><a href="https://github.com/KuchiSofts/WPlus" target="_blank">WPlus v2.0 by KuchiSofts</a></div>';
+    '<div class="wpp-ft"><a href="https://github.com/KuchiSofts/WPlus" target="_blank">WPlus v'+H(W.version||'')+' by KuchiSofts</a></div>';
   document.body.appendChild(P);
 
   // UI debug logger — logs to engine's debug system
@@ -629,15 +632,14 @@
   // ── Update Check ───────────────────────────────────────
   var updateUrl=null;
   function checkForUpdate(){
-    if(cfg('checkUpdates')===false)return;
+    if(cfgRaw('checkUpdates')===false)return;
     try{
       fetch('https://api.github.com/repos/KuchiSofts/WPlus/releases/latest',{headers:{'Accept':'application/json'}})
       .then(function(r){return r.json();})
       .then(function(data){
         var latest=(data.tag_name||'').replace(/^v/,'');
         if(!latest)return;
-        var cur='2.0.0';
-        if(latest.split('.').map(Number).join('.')>cur.split('.').map(Number).join('.')){
+        if(newerVersion(latest,W.version||'0')){
           updateUrl=data.html_url||'https://github.com/KuchiSofts/WPlus/releases/latest';
           // Show update bar
           var bar=document.getElementById('wplus-update-bar');
