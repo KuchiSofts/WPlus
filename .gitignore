@@ -5,36 +5,29 @@ __pycache__/
 
 # Build output
 dist/
+build/
+release/
+*.spec
+*.zip
+WPlus.exe
 
-# User data (never commit)
-data/Images/
-data/Videos/
-data/Sounds/
-data/Docs/
-data/deleted_messages.json
-data/new_messages.json
-data/settings.json
-data/debug.log
-data/status.txt
+# User data (never commit) — keep only the placeholder
+data/*
+!data/.gitkeep
 
-# Temp files
+# Files written by older versions / temp files
+_fileserver.py
 _cdp.json
 _cdp2.json
 _tmp.ps1
 _check.json
 _cdp_msg.json
+*.tmp
 *.log
 
 # IDE
 .vscode/
 .idea/
 
-# Dev notes
+# Dev notes / local AI assistant instructions
 *.private.md
-
-# PyInstaller
-build/
-*.spec
-release/
-*.zip
-WPlus.exe
