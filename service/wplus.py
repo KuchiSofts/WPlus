@@ -188,6 +188,8 @@ except Exception as e:
     except Exception as e2:
         fileserver, fileserver_error = None, f"{e} / {e2}"
 
+import cdpbridge  # Page <-> file server channel (WhatsApp's CSP blocks direct requests)
+
 def start_file_server(port):
     if fileserver is None:
         raise RuntimeError(f"fileserver module not found ({fileserver_error})")
@@ -204,7 +206,24 @@ FILES = {
 LOG_FILE = os.path.join(DATA_DIR, "debug.log")
 STATUS_FILE = os.path.join(DATA_DIR, "status.txt")
 
-state = {"status": "Starting...", "injected": False, "syncs": 0, "running": True, "ws_url": None}
+state = {"status": "Starting...", "injected": False, "syncs": 0, "running": True, "ws_url": None, "bridge": None}
+
+def ensure_bridge(ws_url):
+    """Keep one live CDP bridge session to the WhatsApp page."""
+    b = state["bridge"]
+    if b and b.alive() and b.ws_url == ws_url:
+        return True
+    if b: b.stop()
+    b = cdpbridge.Bridge(ws_url, FILE_SERVER_PORT, SERVER_TOKEN,
+                         extra_routes={"/latest-release": latest_release_for_page}, log=log)
+    state["bridge"] = b
+    ok = b.start_and_wait() and b.alive()
+    if not ok: log("Bridge could not connect")
+    return ok
+
+def stop_bridge():
+    b, state["bridge"] = state["bridge"], None
+    if b: b.stop()
 
 def log(msg):
     state["status"] = msg
@@ -376,18 +395,31 @@ def sync(ws_url):
     return changes
 
 # ── Update Checker ────────────────────────────────────────────
-def check_for_update():
-    """Check GitHub releases for a newer version. Returns (has_update, latest_tag, download_url) or (False, None, None)"""
+def fetch_latest_release():
+    """Latest GitHub release as a dict ({} on failure)."""
     try:
         ctx = ssl.create_default_context()
         conn = http.client.HTTPSConnection("api.github.com", timeout=10, context=ctx)
         conn.request("GET", f"/repos/{GITHUB_REPO}/releases/latest",
                      headers={"User-Agent": f"WPlus/{CURRENT_VERSION}"})
         resp = conn.getresponse()
-        if resp.status != 200:
-            return False, None, None
-        data = json.loads(resp.read())
+        data = json.loads(resp.read()) if resp.status == 200 else {}
         conn.close()
+        return data
+    except Exception:
+        return {}
+
+def latest_release_for_page():
+    """Answer for the panel's update check (it cannot reach api.github.com itself)."""
+    data = fetch_latest_release()
+    return {"tag_name": data.get("tag_name", ""), "html_url": data.get("html_url", "")}
+
+def check_for_update():
+    """Check GitHub releases for a newer version. Returns (has_update, latest_tag, download_url) or (False, None, None)"""
+    try:
+        data = fetch_latest_release()
+        if not data:
+            return False, None, None
 
         latest_tag = data.get("tag_name", "").lstrip("v")
         if not latest_tag:
@@ -448,6 +480,7 @@ def on_quit(icon, item):
         except: pass
         try: uninject(state["ws_url"])
         except: pass
+    stop_bridge()
     state["running"] = False
     icon.stop()
 
@@ -554,6 +587,7 @@ def service_loop():
             log("No debug port — restart WhatsApp")
             return False
         state["ws_url"] = wa["webSocketDebuggerUrl"]
+        ensure_bridge(state["ws_url"])
         log("Injecting...")
         ok, restored = inject(state["ws_url"])
         if ok:
@@ -611,6 +645,7 @@ def service_loop():
                     state["ws_url"] = None
                     continue
                 state["ws_url"] = wa["webSocketDebuggerUrl"]
+                ensure_bridge(state["ws_url"])
                 alive = cdp_eval(state["ws_url"], 'window.__wplus&&window.__wplus.ready?"yes":"no"')
                 if alive != "yes":
                     log("Plugin lost (page reload?) — re-injecting...")
@@ -631,6 +666,7 @@ def service_loop():
         except: pass
         try: uninject(state["ws_url"])
         except: pass
+    stop_bridge()
     log("Service stopped")
 
 # ── Run at Startup ────────────────────────────────────────────

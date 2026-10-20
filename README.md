@@ -129,6 +129,9 @@ WPlus.exe (tray app)
  │    └─ engine.js hooks WhatsApp Web's internal modules (chats, messages,
  │       presence, receipts) and ui.js draws the panel
  ├─ Runs a local file server on 127.0.0.1:18733 that stores backed-up media
+ │    └─ The page reaches it through a DevTools binding (window.__wplusBridge),
+ │       because WhatsApp's Content-Security-Policy blocks requests from the
+ │       page to 127.0.0.1; saved media comes back as blob: URLs
  ├─ Syncs settings and saved messages to data/
  └─ Re-injects after WhatsApp restarts or reloads; removes the plugin on quit
 ```
@@ -158,9 +161,10 @@ running WhatsApp window. It is removed when you quit WPlus and is gone after
 WhatsApp restarts.
 
 **Local server security.** The file server listens on 127.0.0.1 only, accepts
-browser requests only from `https://*.whatsapp.com`, requires a random
-per-session token that is injected with the scripts, and can only read or
-delete files inside the `data/` media folders. Note that any program running
+requests only with the WhatsApp origin (`https://*.whatsapp.com`) and a random
+per-session token, and can only read or delete files inside the `data/` media
+folders. Web pages cannot reach it: the WhatsApp page talks to it only through
+the WPlus service's DevTools connection, which adds the token. Note that any program running
 under your Windows account can use the debug port to control WhatsApp
 Desktop while it is enabled. See [SECURITY.md](SECURITY.md).
 
@@ -266,7 +270,8 @@ WPlus/
 ├── ui.js                  Injected panel UI
 ├── service/
 │   ├── wplus.py           Tray app: setup, WhatsApp detection, CDP injection, sync
-│   └── fileserver.py      Local media/message server (127.0.0.1:18733)
+│   ├── fileserver.py      Local media/message server (127.0.0.1:18733)
+│   └── cdpbridge.py       DevTools bridge between the page and the file server
 ├── scripts/
 │   ├── install.bat        Registry setup + Python packages (run from source)
 │   ├── uninstall.bat      Removes registry changes

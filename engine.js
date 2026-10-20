@@ -34,7 +34,8 @@
 
   // ── Storage helpers ───────────────────────────────────────
   var LS={
-    get:function(k,d){try{return JSON.parse(localStorage.getItem(k));}catch(e){return d||null;}},
+    // A missing key must return the default too (JSON.parse(null) is null, not an error)
+    get:function(k,d){try{var v=JSON.parse(localStorage.getItem(k));return v===null||v===undefined?(d===undefined?null:d):v;}catch(e){return d===undefined?null:d;}},
     set:function(k,v){localStorage.setItem(k,JSON.stringify(v));},
     del:function(k){localStorage.removeItem(k);}
   };
@@ -110,7 +111,25 @@
   // Per-session token set by the WPlus service at injection time — the server rejects requests without it
   var TOKEN=window.__WPLUS_TOKEN__||'';
   try{delete window.__WPLUS_TOKEN__;}catch(e){}
+  // WhatsApp's Content-Security-Policy blocks fetch/img/media requests to 127.0.0.1,
+  // so requests go through a DevTools binding instead: the WPlus service receives
+  // window.__wplusBridge(json), forwards it to the file server and answers through
+  // window.__wplusBridgeReply(id,result). Plain fetch is only a fallback.
+  var _br={n:0,cb:{}};
+  window.__wplusBridgeReply=function(id,res){var c=_br.cb[id];delete _br.cb[id];if(c)c(res);};
+  function hasBridge(){return typeof window.__wplusBridge==='function';}
+  function bridge(method,path,body,cb){
+    var id=++_br.n;_br.cb[id]=cb;
+    try{window.__wplusBridge(JSON.stringify({id:id,method:method,path:path,body:body===undefined?null:body}));}
+    catch(e){delete _br.cb[id];cb(null);}
+  }
   function serverPost(path,data,cb){
+    if(hasBridge()){
+      bridge('POST',path,data,function(r){
+        var j=r&&r.json;dbg('server',path+' → '+(r?r.status:'no reply'));if(cb&&j)cb(j);
+      });
+      return;
+    }
     try{
       fetch(SERVER+path,{method:'POST',headers:{'Content-Type':'application/json','X-WPlus-Token':TOKEN},body:JSON.stringify(data)})
       .then(function(r){return r.json();})
@@ -119,14 +138,31 @@
     }catch(e){dbg('server','fetch error: '+e.message);}
   }
   function serverGet(path,cb){
+    if(hasBridge()){bridge('GET',path,null,function(r){if(cb)cb(r&&r.json||null);});return;}
     try{
       fetch(SERVER+path,{headers:{'X-WPlus-Token':TOKEN}}).then(function(r){return r.json();}).then(cb)
       .catch(function(e){dbg('server','GET '+path+' error');if(cb)cb(null);});
     }catch(e){if(cb)cb(null);}
   }
-  // URL for a saved media file (data-relative path like "Images/x.jpg")
+  function mediaPath(rel){return '/media/'+String(rel).split('/').map(encodeURIComponent).join('/');}
+  // URL for a saved media file (data-relative path like "Images/x.jpg") — fallback only
   function mediaUrl(rel){
-    return SERVER+'/media/'+String(rel).split('/').map(encodeURIComponent).join('/')+'?t='+encodeURIComponent(TOKEN);
+    return SERVER+mediaPath(rel)+'?t='+encodeURIComponent(TOKEN);
+  }
+  // Load a saved media file as a blob: URL (allowed by WhatsApp's CSP); cb(url|null)
+  var _blobs={};
+  function loadMedia(rel,cb){
+    if(_blobs[rel]){cb(_blobs[rel]);return;}
+    if(!hasBridge()){cb(mediaUrl(rel));return;}
+    bridge('GET',mediaPath(rel),null,function(r){
+      if(!r||r.status!==200||!r.b64){cb(null);return;}
+      try{
+        var bin=atob(r.b64),u8=new Uint8Array(bin.length);
+        for(var i=0;i<bin.length;i++)u8[i]=bin.charCodeAt(i);
+        _blobs[rel]=URL.createObjectURL(new Blob([u8],{type:r.mime||'application/octet-stream'}));
+        cb(_blobs[rel]);
+      }catch(e){cb(null);}
+    });
   }
 
   // ── Module finder ─────────────────────────────────────────
@@ -797,6 +833,8 @@
   window.__wplus.goToMessage=goToMessage;
   window.__wplus.showMedia=showMedia;
   window.__wplus.mediaUrl=mediaUrl;
+  window.__wplus.loadMedia=loadMedia;
+  window.__wplus.serverGet=serverGet;
   window.__wplus.forceRestoreCurrentChat=forceRestoreCurrentChat;
   window.__wplus.exportContacts=function(){
     if(!CON){alert('Loading...');return;}var cs=[];
@@ -991,6 +1029,8 @@
     document.querySelectorAll('.wplus-blur-t,.wplus-blur-p').forEach(function(e){e.classList.remove('wplus-blur-t','wplus-blur-p');});
     // Clear debug timer
     if(dbg._timer){clearTimeout(dbg._timer);dbg._timer=null;}
+    // Release cached media blobs
+    Object.keys(_blobs).forEach(function(k){try{URL.revokeObjectURL(_blobs[k]);}catch(e){}});_blobs={};
 
     // Remove event listeners by clearing the wplus object
     window.__wplus={version:'removed',ready:false,cleanup:function(){}};

@@ -349,6 +349,15 @@
 
   // ── Message Preview Popup ──────────────────────────────
   function showPreview(m){
+    // Saved media is loaded as a blob: URL first (WhatsApp's CSP blocks 127.0.0.1 URLs)
+    if(m.mediaFile&&W.loadMedia&&!m._mediaResolved){
+      W.loadMedia(m.mediaFile,function(url){
+        var c={};for(var k in m)c[k]=m[k];
+        c._mediaResolved=true;delete c.mediaFile;if(url)c.media=url;
+        showPreview(c);
+      });
+      return;
+    }
     var old=document.getElementById('wplus-preview');if(old)old.remove();
 
     var sender=m.sender?(m.sender+'').split('@')[0]:'Unknown';
@@ -391,8 +400,8 @@
     if(m.mediaFile&&W.mediaUrl){
       mediaUrl=W.mediaUrl(m.mediaFile);
     }
-    // Priority 2: data URL in media field
-    else if(m.media&&m.media.length>50){
+    // Priority 2: data/blob URL in media field
+    else if(m.media&&(m.media.length>50||m.media.indexOf('blob:')===0)){
       mediaUrl=m.media;
     }
     // Priority 3: base64 in body (for images this is the actual image, for video it's just a thumbnail)
@@ -634,9 +643,13 @@
   function checkForUpdate(){
     if(cfgRaw('checkUpdates')===false)return;
     try{
-      fetch('https://api.github.com/repos/KuchiSofts/WPlus/releases/latest',{headers:{'Accept':'application/json'}})
-      .then(function(r){return r.json();})
-      .then(function(data){
+      // The WPlus service answers this (WhatsApp's CSP blocks api.github.com from the page)
+      var get=W.serverGet?function(cb){W.serverGet('/latest-release',cb);}:function(cb){
+        fetch('https://api.github.com/repos/KuchiSofts/WPlus/releases/latest',{headers:{'Accept':'application/json'}})
+        .then(function(r){return r.json();}).then(cb).catch(function(){});
+      };
+      get(function(data){
+        if(!data)return;
         var latest=(data.tag_name||'').replace(/^v/,'');
         if(!latest)return;
         if(newerVersion(latest,W.version||'0')){
@@ -653,7 +666,7 @@
             if(sideBtn){sideBtn.style.position='relative';sideBtn.appendChild(dot);}
           }
         }
-      }).catch(function(){});
+      });
     }catch(e){}
   }
 
