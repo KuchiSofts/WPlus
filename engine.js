@@ -362,12 +362,13 @@
     if(id==='disableReceipts'){var s=findExport("sendConversationSeen");if(s&&_seen){if(on){s.sendConversationSeen=function(){return Promise.resolve();};dbg('toggle','Read receipts disabled');}else{s.sendConversationSeen=_seen;dbg('toggle','Read receipts restored');}}else dbg('toggle','sendConversationSeen not available');}
     if(id==='playAudioPrivate'){var pl=findExport("markPlayed");if(pl&&_played){if(on){pl.markPlayed=function(){};dbg('toggle','Audio play status hidden');}else{pl.markPlayed=_played;dbg('toggle','Audio play status restored');}}else dbg('toggle','markPlayed not available');}
     // Blur: inject/remove <style> tags — CSS auto-applies to all elements including new ones
+    var sidebarPreview='#pane-side [data-testid="cell-frame-secondary"] > :first-child';
     var blurCSS={
       blurMessages:[
         // Message text in bubbles (chat area only)
         '.message-in .copyable-text','.message-out .copyable-text',
         // Chat list message preview text
-        '._ak8k',
+        '._ak8k',sidebarPreview,
         // Media in messages (blob images >80px = photos, NOT emojis/reactions)
         '.message-in img[src^="blob:"]','.message-out img[src^="blob:"]',
         '.message-in img[src^="data:image/jpeg"]','.message-out img[src^="data:image/jpeg"]',
@@ -392,9 +393,10 @@
         'img[src^="data:image/png"]'
       ],
       blurAvatar:[
-        // ONLY WhatsApp CDN profile pictures (avatars)
+        // CDN avatars and sidebar avatars, including blob/data URLs
         'img[src*=".whatsapp.net/v/t61"]',
-        'img[src*="pps.whatsapp.net"]'
+        'img[src*="pps.whatsapp.net"]',
+        '#pane-side [data-testid="cell-frame-container"] > :first-child img'
       ]
     };
     // Build CSS — add blur + hover-reveal, exclude tiny images (<25px = emojis/reactions/icons)
@@ -408,6 +410,8 @@
       var hov=sels.map(function(s){return s+extraFilter+':hover';}).join(',');
       _builtCSS[id]=sel+'{filter:blur('+blurPx+'px)!important;transition:filter .15s!important}'+hov+'{filter:none!important}';
     });
+    // Avoid stacked filters so hovering the preview reveals all of its text.
+    _builtCSS.blurMessages+=sidebarPreview+' *{filter:none!important}';
     if(_builtCSS[id]){
       var styleId='wplus-css-'+id;
       var existing=document.getElementById(styleId);
