@@ -51,12 +51,57 @@ def _broadcast_env_change():
         ctypes.windll.user32.SendMessageTimeoutW(0xFFFF, 0x001A, 0, "Environment", 0x0002, 2000, None)
     except Exception: pass
 
+def _hklm_policy_ok():
+    """True if the machine-wide policy already opens the debug port for WhatsApp."""
+    import winreg
+    try:
+        key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, WEBVIEW2_POLICY_KEY, 0, winreg.KEY_READ)
+        try: return all(winreg.QueryValueEx(key, exe)[0] == WEBVIEW2_ARGS for exe in WA_EXE_NAMES)
+        finally: winreg.CloseKey(key)
+    except OSError:
+        return False
+
+def _set_hklm_policy():
+    """Write the machine-wide policy through one elevated (UAC) PowerShell call.
+    WebView2 150+ ignores the HKCU policy and the environment variable in many setups,
+    so HKLM is the only reliable place. Returns True if the policy is in place afterwards."""
+    import ctypes
+    from ctypes import wintypes
+    names = ",".join(f"'{n}'" for n in WA_EXE_NAMES)
+    script = (f"$k='HKLM:\\{WEBVIEW2_POLICY_KEY}'; New-Item -Path $k -Force | Out-Null; "
+              f"foreach($n in {names}){{ New-ItemProperty -Path $k -Name $n -Value '{WEBVIEW2_ARGS}' -PropertyType String -Force | Out-Null }}")
+
+    class SHELLEXECUTEINFOW(ctypes.Structure):
+        _fields_ = [("cbSize", wintypes.DWORD), ("fMask", wintypes.ULONG), ("hwnd", wintypes.HWND),
+                    ("lpVerb", wintypes.LPCWSTR), ("lpFile", wintypes.LPCWSTR), ("lpParameters", wintypes.LPCWSTR),
+                    ("lpDirectory", wintypes.LPCWSTR), ("nShow", ctypes.c_int), ("hInstApp", wintypes.HINSTANCE),
+                    ("lpIDList", ctypes.c_void_p), ("lpClass", wintypes.LPCWSTR), ("hkeyClass", wintypes.HKEY),
+                    ("dwHotKey", wintypes.DWORD), ("hIcon", wintypes.HANDLE), ("hProcess", wintypes.HANDLE)]
+    info = SHELLEXECUTEINFOW()
+    info.cbSize = ctypes.sizeof(info)
+    info.fMask = 0x40  # SEE_MASK_NOCLOSEPROCESS
+    info.lpVerb = "runas"
+    info.lpFile = "powershell.exe"
+    info.lpParameters = f'-NoProfile -WindowStyle Hidden -Command "{script}"'
+    info.nShow = 0
+    try:
+        if not ctypes.windll.shell32.ShellExecuteExW(ctypes.byref(info)):
+            return False  # UAC prompt declined
+        ctypes.windll.kernel32.WaitForSingleObject(info.hProcess, 30000)
+        ctypes.windll.kernel32.CloseHandle(info.hProcess)
+    except Exception:
+        return False
+    return _hklm_policy_ok()
+
 def ensure_debug_port():
     """Enable the WebView2 debug port for WhatsApp only (needed for CDP injection).
     Also migrates the global '*' policy / environment variable set by older versions.
     Returns True if anything changed (WhatsApp needs a restart)."""
     import winreg
     changed = False
+    # Machine-wide policy first: the only one current WebView2 runtimes honor everywhere
+    if not _hklm_policy_ok() and _set_hklm_policy():
+        changed = True
     try:
         key = winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, WEBVIEW2_POLICY_KEY, 0,
                                  winreg.KEY_READ | winreg.KEY_WRITE)

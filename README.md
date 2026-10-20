@@ -135,14 +135,20 @@ WPlus.exe (tray app)
 
 **What WPlus changes on your system**
 
-- **Registry (current user only):** the WebView2 policy
-  `HKCU\Software\Policies\Microsoft\Edge\WebView2\AdditionalBrowserArguments`
+- **Registry:** the WebView2 policy key
+  `Software\Policies\Microsoft\Edge\WebView2\AdditionalBrowserArguments`
   gets values named `WhatsApp.Root.exe` and `WhatsApp.exe` with
   `--remote-debugging-port=9222 --remote-allow-origins=http://127.0.0.1:9222`.
   This opens a DevTools port for WhatsApp only — no other WebView2 app is
-  affected. Versions before 2.0.1 set this for *all* WebView2 apps (value
-  `*` and the `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` environment variable);
-  2.0.1 removes those automatically.
+  affected.
+  - It is written under **HKLM** (machine-wide). WebView2 runtime 150 and newer
+    ignore the per-user (HKCU) policy and the environment variable in many
+    setups, so on first run Windows shows **one UAC prompt** to allow this.
+  - The same values are also written under **HKCU** as a fallback for older
+    runtimes (used if you decline the UAC prompt).
+  - Versions before 2.0.1 set this for *all* WebView2 apps (value `*` and the
+    `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` environment variable); 2.0.1
+    removes those automatically.
 - **Optional:** *Run at Startup* adds a `WPlus` value under
   `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`.
 - **Files:** everything else lives in the `data/` folder next to the exe.
@@ -188,11 +194,12 @@ Turn it off with *Settings → Check for updates* in the panel.
 
 1. Right-click the tray icon → **Quit WPlus**.
 2. Remove the registry changes — either run `scripts/uninstall.bat` from the
-   source folder, or paste this into PowerShell:
+   source folder, or paste this into an **administrator** PowerShell:
 
    ```powershell
+   foreach ($k in 'HKLM:\Software\Policies\Microsoft\Edge\WebView2\AdditionalBrowserArguments','HKCU:\Software\Policies\Microsoft\Edge\WebView2\AdditionalBrowserArguments') {
+     'WhatsApp.Root.exe','WhatsApp.exe' | ForEach-Object { Remove-ItemProperty -Path $k -Name $_ -ErrorAction SilentlyContinue } }
    $k = 'HKCU:\Software\Policies\Microsoft\Edge\WebView2\AdditionalBrowserArguments'
-   'WhatsApp.Root.exe','WhatsApp.exe' | ForEach-Object { Remove-ItemProperty -Path $k -Name $_ -ErrorAction SilentlyContinue }
    if ((Get-ItemProperty $k -Name '*' -ErrorAction SilentlyContinue).'*' -like '*9222*') { Remove-ItemProperty $k -Name '*' }
    if ([Environment]::GetEnvironmentVariable('WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS','User') -like '*9222*') { [Environment]::SetEnvironmentVariable('WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS', $null, 'User') }
    Remove-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'WPlus' -ErrorAction SilentlyContinue
@@ -262,7 +269,8 @@ WPlus/
 │   └── fileserver.py      Local media/message server (127.0.0.1:18733)
 ├── scripts/
 │   ├── install.bat        Registry setup + Python packages (run from source)
-│   └── uninstall.bat      Removes registry changes
+│   ├── uninstall.bat      Removes registry changes
+│   └── webview2-policy.ps1  Sets/removes the WebView2 debug-port policy (used by both)
 ├── assets/                Icons
 ├── data/                  Created at runtime (git-ignored)
 ├── WPlus.bat              Starts the tray app from source
