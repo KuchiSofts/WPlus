@@ -194,16 +194,26 @@ def cdp_eval(ws_url, code):
     p = os.path.join(DATA_DIR, "_cdp.json")
     with open(p, "w", encoding="utf-8") as f: f.write(cdp)
     try:
-        r = subprocess.run(["powershell", "-ExecutionPolicy", "Bypass", "-Command",
+        # Read frames until the whole message arrives (large results such as the
+        # deleted-messages list span many frames), skip any CDP events, and print
+        # the reply for id 1 as UTF-8 so non-ASCII message text survives.
+        r = subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
+            f'[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;'
             f'$ws=New-Object System.Net.WebSockets.ClientWebSocket;$ct=[System.Threading.CancellationToken]::None;'
             f'$ws.ConnectAsync([System.Uri]::new("{ws_url}"),$ct).Wait();'
             f'$msg=[System.IO.File]::ReadAllText("{p}");'
             f'$b=[System.Text.Encoding]::UTF8.GetBytes($msg);'
             f'$ws.SendAsync([System.ArraySegment[byte]]::new($b),[System.Net.WebSockets.WebSocketMessageType]::Text,$true,$ct).Wait();'
             f'$buf=New-Object byte[] 262144;'
-            f'$ws.ReceiveAsync([System.ArraySegment[byte]]::new($buf),$ct).Wait()|Out-Null;'
-            f'[System.Text.Encoding]::UTF8.GetString($buf).Trim([char]0);$ws.Dispose()'],
-            capture_output=True, text=True, timeout=30, creationflags=subprocess.CREATE_NO_WINDOW)
+            f'for($i=0;$i -lt 100;$i++){{'
+            f'$ms=New-Object System.IO.MemoryStream;'
+            f'do{{$res=$ws.ReceiveAsync([System.ArraySegment[byte]]::new($buf),$ct).Result;$ms.Write($buf,0,$res.Count)}}'
+            f'while(-not $res.EndOfMessage -and $res.MessageType -ne [System.Net.WebSockets.WebSocketMessageType]::Close);'
+            f'$s=[System.Text.Encoding]::UTF8.GetString($ms.ToArray());'
+            f'if($res.MessageType -eq [System.Net.WebSockets.WebSocketMessageType]::Close){{break}};'
+            f'if($s.StartsWith(\'{{"id":1,\')){{$s;break}}}};$ws.Dispose()'],
+            capture_output=True, encoding="utf-8", errors="replace", timeout=60,
+            creationflags=subprocess.CREATE_NO_WINDOW)
         os.remove(p)
         return json.loads(r.stdout.strip()).get("result", {}).get("result", {}).get("value")
     except:
