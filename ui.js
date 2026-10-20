@@ -5,7 +5,10 @@
   function cfg(k){try{return(JSON.parse(localStorage.getItem('wplus_cfg')||'{}')||{})[k]||false;}catch(e){return false;}}
   function setCfg(k,v){try{var s=JSON.parse(localStorage.getItem('wplus_cfg')||'{}');s[k]=v;localStorage.setItem('wplus_cfg',JSON.stringify(s));}catch(e){}}
   function delC(){try{return(W.deletedMsgs?W.deletedMsgs('get'):JSON.parse(localStorage.getItem('wplus_del')||'[]')).length;}catch(e){return 0;}}
-  function H(s){return(s||'').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+  // Escape text for safe insertion into HTML (element content and quoted attributes)
+  function H(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');}
+
+  function safeName(s){return String(s==null?'':s).replace(/[^0-9A-Za-z_-]/g,'').substring(0,32)||'x';}
 
   // Exact WhatsApp font stack
   var FF='"Segoe UI","Helvetica Neue",Helvetica,"Lucida Grande",Arial,Ubuntu,Cantarell,"Fira Sans",sans-serif';
@@ -217,7 +220,7 @@
       var body='';
       var isBase64=rawBody.length>100&&(rawBody.indexOf('/9j/')===0||rawBody.indexOf('data:')===0||rawBody.indexOf('AAAA')===0||/^[A-Za-z0-9+/=]{50,}/.test(rawBody));
       if(isBase64||['image','video','ptt','audio','sticker','document'].indexOf(m.type)!==-1){
-        body=typeIcon+' '+(m.type==='ptt'?'Voice message':m.type.charAt(0).toUpperCase()+m.type.slice(1))+(m.caption?' — '+m.caption.substring(0,40):'');
+        var tn=String(m.type||'media');body=typeIcon+' '+(tn==='ptt'?'Voice message':tn.charAt(0).toUpperCase()+tn.slice(1))+(m.caption?' — '+m.caption.substring(0,40):'');
       } else {
         body=rawBody.substring(0,80);
       }
@@ -312,8 +315,8 @@
     log.slice().reverse().forEach(function(e){
       var c=colors[e.cat]||'#8696a0';
       h+='<div style="padding:4px 20px 4px 36px;border-bottom:1px solid rgba(255,255,255,.03);font-size:11px;font-family:Consolas,monospace">';
-      h+='<span style="color:#667781">'+e.ts+'</span> ';
-      h+='<span style="color:'+c+';font-weight:600">['+e.cat+']</span> ';
+      h+='<span style="color:#667781">'+H(e.ts)+'</span> ';
+      h+='<span style="color:'+c+';font-weight:600">['+H(e.cat)+']</span> ';
       h+='<span style="color:#d1d7db">'+H(e.msg)+'</span>';
       if(e.data)h+=' <span style="color:#667781">'+H(e.data)+'</span>';
       h+='</div>';
@@ -399,27 +402,27 @@
 
     // Render media
     if(hasMedia&&(m.type==='image'||m.type==='sticker')){
-      body+='<img id="wplus-preview-img" src="'+mediaUrl+'" style="max-width:100%;max-height:250px;border-radius:6px;margin:6px 0;cursor:pointer;object-fit:contain" onerror="this.style.display=\'none\'">';
+      body+='<img id="wplus-preview-img" src="'+H(mediaUrl)+'" style="max-width:100%;max-height:250px;border-radius:6px;margin:6px 0;cursor:pointer;object-fit:contain" onerror="this.style.display=\'none\'">';
       body+='<div style="text-align:center;font-size:10px;color:#667781;margin-bottom:4px">Click image to zoom</div>';
     } else if(hasMedia&&m.type==='video'){
       // For video: if source is base64 thumbnail (small), show as image preview, not video player
       if(!m.mediaFile&&!m.media&&isBase64&&rawBody.length<10000){
         // This is just the JPEG thumbnail, not the actual video
         body+='<div style="position:relative;cursor:pointer" id="wplus-preview-vid-thumb">';
-        body+='<img src="'+mediaUrl+'" style="max-width:100%;border-radius:6px;margin:6px 0;opacity:.7">';
+        body+='<img src="'+H(mediaUrl)+'" style="max-width:100%;border-radius:6px;margin:6px 0;opacity:.7">';
         body+='<div style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);font-size:40px">\u{25B6}</div></div>';
         body+='<div style="text-align:center;font-size:11px;color:#8696a0;margin-bottom:4px">Video thumbnail only</div>';
       } else {
-        body+='<video id="wplus-preview-vid" controls playsinline style="max-width:100%;max-height:250px;border-radius:6px;margin:6px 0;background:#000"><source src="'+mediaUrl+'"></video>';
+        body+='<video id="wplus-preview-vid" controls playsinline style="max-width:100%;max-height:250px;border-radius:6px;margin:6px 0;background:#000"><source src="'+H(mediaUrl)+'"></video>';
         body+='<div id="wplus-preview-fullscreen" style="text-align:center;margin:2px 0"><span style="color:#53bdeb;font-size:11px;cursor:pointer">\u{26F6} Fullscreen</span></div>';
       }
     } else if(hasMedia&&(m.type==='ptt'||m.type==='audio')){
       body+='<div style="padding:8px 0;display:flex;align-items:center;gap:8px">';
       body+='<span style="font-size:22px">\u{1F3A4}</span>';
-      body+='<audio controls src="'+mediaUrl+'" style="flex:1;height:36px"></audio></div>';
+      body+='<audio controls src="'+H(mediaUrl)+'" style="flex:1;height:36px"></audio></div>';
     } else if(isMediaType&&!hasMedia){
       var typeLabel={image:'\u{1F4F7} Image',video:'\u{1F3AC} Video',ptt:'\u{1F3A4} Voice',audio:'\u{1F3B5} Audio',sticker:'\u{1F3A8} Sticker',document:'\u{1F4C4} Document'}[m.type]||m.type;
-      body+='<div style="color:#8696a0;font-size:13px;font-style:italic;padding:12px 0;text-align:center">'+typeLabel+' \u2014 media not available</div>';
+      body+='<div style="color:#8696a0;font-size:13px;font-style:italic;padding:12px 0;text-align:center">'+H(typeLabel)+' \u2014 media not available</div>';
     }
 
     // Caption
@@ -437,7 +440,7 @@
 
     // Time + type badge
     body+='<div style="display:flex;justify-content:flex-end;align-items:center;gap:6px;margin-top:2px">';
-    body+='<span style="font-size:10px;color:#667781;background:rgba(255,255,255,.06);padding:1px 6px;border-radius:3px">'+m.type+'</span>';
+    body+='<span style="font-size:10px;color:#667781;background:rgba(255,255,255,.06);padding:1px 6px;border-radius:3px">'+H(m.type)+'</span>';
     body+='<span style="font-size:10px;color:#667781">'+new Date(m.time).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})+'</span>';
     body+='</div></div></div>';
 
@@ -478,7 +481,7 @@
       dlBtn.onclick=function(){
         var ext={image:'jpg',video:'mp4',ptt:'ogg',audio:'mp3',sticker:'webp'}[m.type]||'bin';
         var a=document.createElement('a');a.href=mediaUrl;
-        a.download='WPlus_'+m.type+'_'+sender+'_'+new Date(m.time).toISOString().slice(0,10)+'.'+ext;
+        a.download='WPlus_'+safeName(m.type)+'_'+safeName(sender)+'_'+new Date(m.time).toISOString().slice(0,10)+'.'+ext;
         a.click();
       };
     }
@@ -497,7 +500,7 @@
     // Top bar
     var topBar=document.createElement('div');
     topBar.style.cssText='height:48px;display:flex;align-items:center;padding:0 16px;flex-shrink:0;background:rgba(0,0,0,.5);z-index:1';
-    topBar.innerHTML='<div style="color:#fff;font-size:14px;flex:1">+'+(sender||'?')+' \u00B7 '+new Date(time).toLocaleString()+'</div>';
+    topBar.innerHTML='<div style="color:#fff;font-size:14px;flex:1">+'+H(sender||'?')+' \u00B7 '+H(new Date(time).toLocaleString())+'</div>';
 
     // Download button
     var dlDiv=document.createElement('span');
@@ -507,7 +510,7 @@
       e.stopPropagation();
       var ext={image:'jpg',video:'mp4',ptt:'ogg',audio:'mp3',sticker:'webp'}[type]||'bin';
       var a=document.createElement('a');a.href=dataUrl;
-      a.download='WPlus_'+type+'_'+(sender||'media')+'_'+new Date(time).toISOString().slice(0,10)+'.'+ext;
+      a.download='WPlus_'+safeName(type)+'_'+safeName(sender||'media')+'_'+new Date(time).toISOString().slice(0,10)+'.'+ext;
       a.click();
     };
     topBar.appendChild(dlDiv);
