@@ -215,7 +215,6 @@
     var h='';msgs.slice().reverse().forEach(function(m,idx){
       var t=new Date(m.time).toLocaleString();
       var s=m.sender?(m.sender+'').split('@')[0]:'?';
-      var hasBlob=!!m.media;
       var typeIcon={image:'\u{1F4F7}',video:'\u{1F3AC}',ptt:'\u{1F3A4}',audio:'\u{1F3B5}',sticker:'\u{1F3A8}',vcard:'\u{1F464}',location:'\u{1F4CD}'}[m.type]||'\u{1F4AC}';
 
       // Compact body preview — detect base64 and show type instead
@@ -254,8 +253,8 @@
     });
 
     // Go to chat arrow
-    el.querySelectorAll('[data-nav]').forEach(function(btn){
-      btn.onclick=function(e){
+    el.querySelectorAll('[data-nav]').forEach(function(nb){
+      nb.onclick=function(e){
         e.stopPropagation();
         var id=this.dataset.nav;
         uiLog('Go to chat clicked',{id:id.substring(0,50)});
@@ -334,7 +333,6 @@
 
   // Debug toggle controls engine logging
   // Already handled by the generic toggle handler — just wire it up
-  var origToggleHandler=null;
   P.querySelectorAll('.wpp-tg').forEach(function(el){
     if(el.dataset.t==='debugEnabled'){
       el.onclick=function(e){
@@ -364,9 +362,6 @@
     var time=new Date(m.time).toLocaleString();
 
     uiLog('Preview opened',{type:m.type,sender:sender,time:time,id:(m.id||'?').substring(0,40),hasMedia:!!(m.media||m.mediaFile),bodyLen:(m.body||'').length,chat:m.chat||'?'});
-    var hasMedia=!!m.media;
-    var typeIcon={image:'\u{1F4F7}',video:'\u{1F3AC}',ptt:'\u{1F3A4}',audio:'\u{1F3B5}',sticker:'\u{1F3A8}'}[m.type]||'';
-
     var overlay=document.createElement('div');
     overlay.id='wplus-preview';
     overlay.style.cssText='position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999999;background:rgba(0,0,0,.7);display:flex;align-items:center;justify-content:center;font-family:Segoe UI,sans-serif';
@@ -685,7 +680,7 @@
   // ── Sidebar icon positioning ───────────────────────────
   function pos(){var mb=null;document.querySelectorAll('button,[role=button]').forEach(function(e){if(e.getBoundingClientRect().left<60&&(e.title==='Media'||e.ariaLabel==='Media'))mb=e;});
     if(mb){var r=mb.getBoundingClientRect();btn.style.top=(r.top-48)+'px';btn.style.left=Math.round(r.left)+'px';}
-    else{var a=[];document.querySelectorAll('button,[role=button]').forEach(function(e){var r=e.getBoundingClientRect();if(r.left<60&&r.width>20&&r.width<55&&r.height>20)a.push({y:r.top,x:r.left});});a.sort(function(a,b){return a.y-b.y;});if(a.length>=3){var t=a[a.length-3];btn.style.top=(t.y-48)+'px';btn.style.left=Math.round(t.x)+'px';}}}
+    else{var a=[];document.querySelectorAll('button,[role=button]').forEach(function(e){var br=e.getBoundingClientRect();if(br.left<60&&br.width>20&&br.width<55&&br.height>20)a.push({y:br.top,x:br.left});});a.sort(function(p,q){return p.y-q.y;});if(a.length>=3){var t=a[a.length-3];btn.style.top=(t.y-48)+'px';btn.style.left=Math.round(t.x)+'px';}}}
   pos();window.addEventListener('resize',pos);setInterval(pos,10000); // Check every 10s instead of 3s
 
   // ── Chat header restore button ────────────────────────

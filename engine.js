@@ -5,10 +5,10 @@
   if(window.__wplus&&window.__wplus.cleanup)try{window.__wplus.cleanup();}catch(e){}
   window.__wplus={version:'2.0.1',ready:false};  // Keep in sync with CURRENT_VERSION in service/wplus.py
 
-  var MAX_MSGS=1000,hooked=false;
+  var MAX_MSGS=1000;
   var CC=null,CON=null,GRP=null;
   var _comp,_rec,_pres,_seen,_played;
-  var presInt=null,blurObs={};
+  var presInt=null;
 
   // ── Debug system ──────────────────────────────────────────
   // Off by default — the log contains message previews and phone numbers.
@@ -211,10 +211,8 @@
     }catch(e){dbg('restore','Error: '+e.message);}
   }
 
-  var _hookCount=0;
   function hookChat(chat){
     if(!chat||!chat.msgs||chat.msgs.__wp)return;chat.msgs.__wp=true;
-    _hookCount++;
     var chatName=chat.__x_name||chat.__x_formattedTitle||(chat.id?chat.id.user:'?');
 
     chat.msgs.on('add',function(msg){try{
@@ -448,14 +446,14 @@
     };
     // Build CSS — add blur + hover-reveal, exclude tiny images (<25px = emojis/reactions/icons)
     var _builtCSS={};
-    Object.keys(blurCSS).forEach(function(id){
-      var sels=blurCSS[id];
-      var blurPx=id==='blurAvatar'?'10':id==='blurPhotos'?'8':'5';
+    Object.keys(blurCSS).forEach(function(k){
+      var sels=blurCSS[k];
+      var blurPx=k==='blurAvatar'?'10':k==='blurPhotos'?'8':'5';
       // For photos: add min-width/height filter to exclude emojis and reaction images
-      var extraFilter=id==='blurPhotos'?':not([width="17"]):not([height="17"]):not([width="20"]):not([height="20"])':'';
-      var sel=sels.map(function(s){return s+extraFilter;}).join(',');
-      var hov=sels.map(function(s){return s+extraFilter+':hover';}).join(',');
-      _builtCSS[id]=sel+'{filter:blur('+blurPx+'px)!important;transition:filter .15s!important}'+hov+'{filter:none!important}';
+      var extraFilter=k==='blurPhotos'?':not([width="17"]):not([height="17"]):not([width="20"]):not([height="20"])':'';
+      var sel=sels.map(function(x){return x+extraFilter;}).join(',');
+      var hov=sels.map(function(x){return x+extraFilter+':hover';}).join(',');
+      _builtCSS[k]=sel+'{filter:blur('+blurPx+'px)!important;transition:filter .15s!important}'+hov+'{filter:none!important}';
     });
     // Avoid stacked filters so hovering the preview reveals all of its text.
     _builtCSS.blurMessages+=sidebarPreview+' *{filter:none!important}';
@@ -465,7 +463,7 @@
     if(_builtCSS[id]){
       var styleId='wplus-css-'+id;
       var existing=document.getElementById(styleId);
-      if(on&&!existing){var s=document.createElement('style');s.id=styleId;s.textContent=_builtCSS[id];document.head.appendChild(s);dbg('toggle','CSS injected: '+id+' ('+blurCSS[id].length+' selectors)');}
+      if(on&&!existing){var st=document.createElement('style');st.id=styleId;st.textContent=_builtCSS[id];document.head.appendChild(st);dbg('toggle','CSS injected: '+id+' ('+blurCSS[id].length+' selectors)');}
       else if(!on&&existing){existing.remove();dbg('toggle','CSS removed: '+id);}
     }
   }
@@ -564,7 +562,6 @@
     }
     if(bestMatch)dbg('nav','Time-matched revoked msg (diff: '+Math.round(bestDiff/1000)+'s)');
     return bestMatch;
-    return null;
   }
 
   // Main navigation function — async, loads older messages if needed
@@ -869,7 +866,7 @@
   var att=0;
   function boot(){
     if(++att>120)return;if(!init()){setTimeout(boot,1000);return;}
-    (CC._models||[]).forEach(hookChat);CC.on('add',hookChat);hooked=true;
+    (CC._models||[]).forEach(hookChat);CC.on('add',hookChat);
     // ── Smart Restore System ─────────────────────────────────
     // IDs change between sessions — match by sender+time or exact ID
     var restoredSet=new Set();
@@ -1009,10 +1006,6 @@
   window.__wplus.cleanup=function(){
     // Stop timers
     if(presInt){clearInterval(presInt);presInt=null;}
-
-    // Disconnect all MutationObservers
-    Object.keys(blurObs).forEach(function(k){try{blurObs[k].disconnect();}catch(e){}});
-    blurObs={};
 
     // Remove injected CSS
     ['wplus-css-blurMessages','wplus-css-blurContacts','wplus-css-blurPhotos','wplus-css-blurAvatar','wplus-css'].forEach(function(id){var e=document.getElementById(id);if(e)e.remove();});
