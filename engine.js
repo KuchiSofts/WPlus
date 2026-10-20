@@ -11,7 +11,9 @@
   var presInt=null,blurObs={};
 
   // ── Debug system ──────────────────────────────────────────
-  var debugEnabled=true;
+  // Off by default — the log contains message previews and phone numbers.
+  // Enabled from the panel (Settings → Debug logging), stored as wplus_cfg.debugEnabled.
+  var debugEnabled=false;
   var debugLog=[];
   var MAX_LOG=500;
   function dbg(category, msg, data){
@@ -42,6 +44,9 @@
     if(v===undefined)return k?s[k]:s;
     s[k]=v;LS.set('wplus_cfg',s);return v;
   }
+
+  debugEnabled=(LS.get('wplus_cfg',{})||{}).debugEnabled===true;
+  if(!debugEnabled){try{localStorage.removeItem('wplus_log');}catch(e){}}
 
   // Merge all old storage keys into current key on first call
   var _merged=false;
@@ -327,7 +332,7 @@
             var blob=md.mediaBlob._blob;
             var r=new FileReader();
             r.onload=function(){entry.data=r.result;entry.mime=blob.type;entry.size=blob.size;saveEntry();
-              console.log('[WPlus] View-once captured:',type,sender);};
+              dbg('msg:new','View-once captured: '+type);};
             r.readAsDataURL(blob);return true;
           }
           // Try force-downloading via WhatsApp's internal API
@@ -927,7 +932,7 @@
     getLogText:function(){return debugLog.map(function(e){return e.ts+' ['+e.cat+'] '+e.msg+(e.data?' | '+e.data:'');}).join('\n');},
     clear:function(){debugLog=[];dbg('debug','Log cleared');},
     enable:function(){debugEnabled=true;dbg('debug','Debug enabled');},
-    disable:function(){debugEnabled=false;},
+    disable:function(){debugEnabled=false;debugLog=[];try{localStorage.removeItem('wplus_log');}catch(e){}},
     isEnabled:function(){return debugEnabled;},
     status:function(){
       return{

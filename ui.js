@@ -157,7 +157,7 @@
     '<div class="wpp-sec">Settings</div>'+
     T('checkUpdates',I.ch,'Check for updates','Notify when new version available',cfg('checkUpdates')!==false)+
     '<div class="wpp-div"></div>'+
-    T('debugEnabled',I.ch,'Debug logging','Track all WPlus events',cfg('debugEnabled')!==false)+
+    T('debugEnabled',I.ch,'Debug logging','Off by default — log may contain message previews',cfg('debugEnabled')===true)+
     '<div class="wpp-div"></div>'+
     R('debug-status',I.ch,'System status','Engine, hooks, storage info','')+
     '<div class="wpp-sub" id="wp-ds"></div>'+

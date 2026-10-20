@@ -315,8 +315,11 @@ def sync(ws_url):
     sync._c += 1
     if sync._c % 5 == 0:
         try:
-            log_val = cdp_eval(ws_url, 'localStorage.getItem("wplus_log")')
-            if log_val and log_val != "null":
+            log_val = cdp_eval(ws_url, 'String(localStorage.getItem("wplus_log"))')  # None = CDP error
+            if log_val == "null":
+                # Debug logging is off (the engine clears wplus_log) — don't keep an old log on disk
+                if os.path.exists(LOG_FILE): os.remove(LOG_FILE)
+            elif log_val:
                 entries = json.loads(log_val)
                 if isinstance(entries, list) and entries:
                     lines = [f"WPlus Debug Log — {time.strftime('%Y-%m-%d %H:%M:%S')}", "=" * 50, ""]
@@ -460,8 +463,6 @@ def create_tray():
 def service_loop():
     with open(STATUS_FILE, "w", encoding="utf-8") as f:
         f.write(f"WPlus Service started {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
-    with open(LOG_FILE, "w", encoding="utf-8") as f:
-        f.write(f"[WPlus] Session started {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
 
     try:
         start_file_server(FILE_SERVER_PORT)
