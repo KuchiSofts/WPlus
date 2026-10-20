@@ -36,9 +36,18 @@
   var LS={
     // A missing key must return the default too (JSON.parse(null) is null, not an error)
     get:function(k,d){try{var v=JSON.parse(localStorage.getItem(k));return v===null||v===undefined?(d===undefined?null:d):v;}catch(e){return d===undefined?null:d;}},
-    set:function(k,v){localStorage.setItem(k,JSON.stringify(v));},
-    del:function(k){localStorage.removeItem(k);}
+    // Never throws: a full localStorage (QuotaExceededError) must not break message capture
+    set:function(k,v){try{localStorage.setItem(k,JSON.stringify(v));return true;}catch(e){dbg('storage','Write failed: '+k+' ('+(e&&e.name)+')');return false;}},
+    del:function(k){try{localStorage.removeItem(k);}catch(e){}}
   };
+  // Media kept in memory when it does not fit in localStorage (this session only)
+  var _memMedia={},_memVO={};
+  function saveDel(d){
+    if(LS.set('wplus_del',d))return true;
+    d.forEach(function(m){if(m&&m.media){if(m.id)_memMedia[m.id]={media:m.media,mime:m.mime};delete m.media;}});
+    while(!LS.set('wplus_del',d)){if(d.length<2)return false;d.splice(0,Math.ceil(d.length/4));}
+    return true;
+  }
 
   function settings(k,v){
     var s=LS.get('wplus_cfg',{});
@@ -67,7 +76,7 @@
     });
     if(added>0){
       if(current.length>MAX_MSGS)current=current.slice(-MAX_MSGS);
-      LS.set('wplus_del',current);
+      saveDel(current);
       dbg('storage','Merged '+added+' msgs from old keys. Total: '+current.length);
     }
   }
@@ -75,14 +84,16 @@
   function deletedMsgs(action,item){
     mergeOldKeys();
     var d=LS.get('wplus_del',[])||[];
+    if(!Array.isArray(d))d=[];
+    d.forEach(function(m){var x=m&&!m.media&&!m.mediaFile&&_memMedia[m.id];if(x){m.media=x.media;if(x.mime)m.mime=x.mime;}});
     if(action==='get')return d;
     if(action==='add'){
       // Deduplicate
       var exists=d.some(function(m){return m.id===item.id;});
-      if(!exists){d.push(item);if(d.length>MAX_MSGS)d=d.slice(-MAX_MSGS);LS.set('wplus_del',d);}
+      if(!exists){d.push(item);if(d.length>MAX_MSGS)d=d.slice(-MAX_MSGS);saveDel(d);}
     }
     if(action==='clear'){
-      LS.del('wplus_del');
+      LS.del('wplus_del');_memMedia={};
       ['wplus_deleted_msgs','wtplus_deleted_msgs','wtplus_del'].forEach(function(k){LS.del(k);});
       serverPost('/deleted/clear',{});
     }
@@ -94,16 +105,27 @@
     if(!r||!r.mediaFile)return;
     var d=deletedMsgs('get');
     for(var i=d.length-1;i>=0;i--){
-      if(d[i].id===id){d[i].mediaFile=r.mediaFile;delete d[i].media;LS.set('wplus_del',d);break;}
+      if(d[i].id===id){d[i].mediaFile=r.mediaFile;delete d[i].media;delete _memMedia[id];saveDel(d);break;}
     }
   }
 
   function viewOnce(action,item){
     var d=LS.get('wplus_vo',[])||[];
+    if(!Array.isArray(d))d=[];
     if(action==='get')return d;
-    if(action==='add'){d.push(item);if(d.length>200)d=d.slice(-200);LS.set('wplus_vo',d);}
-    if(action==='clear'){LS.del('wplus_vo');}
+    if(action==='add'){
+      var idx=d.findIndex(function(x){return x.id===item.id;});
+      if(idx>=0)d[idx]=item;else d.push(item);
+      if(d.length>200)d=d.slice(-200);saveVO(d);
+    }
+    if(action==='clear'){LS.del('wplus_vo');_memVO={};}
     return d;
+  }
+  function saveVO(d){
+    if(LS.set('wplus_vo',d))return true;
+    // Too big for localStorage: keep the media in memory, store the entry without it
+    d.forEach(function(x){if(x&&x.data){_memVO[x.id]=x.data;x.data=null;x.inMemory=true;}});
+    return LS.set('wplus_vo',d);
   }
 
   // ── File Server API (localhost:18733) ────────────────────
@@ -327,7 +349,7 @@
               dbg('msg:del','Media captured as base64 ('+Math.round(reader.result.length/1024)+'KB)');
               var d=deletedMsgs('get');
               for(var i=d.length-1;i>=0;i--){if(d[i].id===entry.id){d[i].media=entry.media;d[i].mime=entry.mime;break;}}
-              LS.set('wplus_del',d);
+              saveDel(d);
               serverPost('/msg/deleted',entry,function(r){noteMediaFile(entry.id,r);});
               dbg('msg:del','Media sent to file server');
             };
@@ -352,12 +374,7 @@
       var type=msg.__x_type||'unknown',sender=(msg.__x_from?msg.__x_from._serialized:'?').split('@')[0];
       var entry={id:msg.__x_id._serialized,type:type,sender:sender,time:Date.now(),data:null,mime:null,size:0};
 
-      function saveEntry(){
-        var list=viewOnce('get');var idx=list.findIndex(function(x){return x.id===entry.id;});
-        if(idx>=0)list[idx]=entry;else list.push(entry);
-        if(list.length>200)list=list.slice(-200);
-        LS.set('wplus_vo',list);fire('update');
-      }
+      function saveEntry(){viewOnce('add',entry);fire('update');}
 
       function tryCapture(){
         try{
@@ -380,7 +397,7 @@
       // Also try to prevent view-once flag from blocking re-views
       try{msg.__x_isViewOnce=false;msg.__x_viewOnce=false;}catch(e){}
 
-      viewOnce('add',entry);saveEntry();
+      saveEntry();
       // Multiple retry attempts — media may load at different times
       if(!tryCapture()){
         [2000,5000,10000,20000,30000].forEach(function(d){setTimeout(tryCapture,d);});
@@ -855,6 +872,7 @@
   };
   window.__wplus.downloadVO=function(id){
     var list=viewOnce('get'),item=list.find(function(x){return x.id===id;});
+    if(item&&!item.data&&_memVO[id])item.data=_memVO[id];
     if(!item||!item.data){alert('Media not available yet.');return;}
     var ext='bin';if(item.mime){if(item.mime.indexOf('image')!==-1)ext='jpg';else if(item.mime.indexOf('video')!==-1)ext='mp4';else if(item.mime.indexOf('audio')!==-1||item.mime.indexOf('ogg')!==-1)ext='ogg';}
     else{if(item.type==='image')ext='jpg';else if(item.type==='video')ext='mp4';else if(item.type==='ptt')ext='ogg';}
