@@ -7,7 +7,7 @@
 
   var MAX_MSGS=1000;
   var CC=null,CON=null,GRP=null;
-  var _comp,_rec,_pres,_seen,_played;
+  var _comp,_rec,_pres,_seen,_played,_mods={};
   var presInt=null;
 
   // ── Debug system ──────────────────────────────────────────
@@ -188,12 +188,17 @@
   }
 
   // ── Module finder ─────────────────────────────────────────
-  function findExport(name){
+  // One pass over the module map: {name: module object that exports it}
+  function findExports(names){
+    var out={},left=names.length;
     try{var ks=Object.keys(window.require("__debug").modulesMap);
-    for(var i=0;i<ks.length;i++){try{var m=window.require(ks[i]),d=m&&m.default||m;
-    if(d&&typeof d[name]==='function')return d;if(m&&typeof m[name]==='function')return m;}catch(e){}}
-    }catch(e){}return null;
+    for(var i=0;i<ks.length&&left;i++){try{var m=window.require(ks[i]),d=m&&m.default||m;
+    names.forEach(function(n){if(out[n])return;if(d&&typeof d[n]==='function'){out[n]=d;left--;}else if(m&&typeof m[n]==='function'){out[n]=m;left--;}});}catch(e){}}
+    }catch(e){}return out;
   }
+  // Replacements remember the original, so a re-injection that skipped cleanup still restores it
+  function orig(f){return f&&f.__wpOrig||f;}
+  function noop(o){var f=function(){return Promise.resolve();};f.__wpOrig=o;return f;}
 
   function init(){
     try{
@@ -204,10 +209,12 @@
       dbg('init','ChatCollection found',{chats:CC._models.length});
       try{CON=window.require("WAWebContactCollection").ContactCollection;dbg('init','ContactCollection found',{contacts:(CON._models||[]).length});}catch(e){dbg('init','ContactCollection failed',e.message);}
       try{GRP=window.require("WAWebGroupMetadataCollection").GroupMetadataCollection;dbg('init','GroupMetadata found',{groups:(GRP._models||[]).length});}catch(e){}
-      try{var x=findExport("markComposing");if(x){_comp=x.markComposing;_rec=x.markRecording;dbg('init','Composing hooks ready');}}catch(e){}
-      try{var p=findExport("sendPresenceAvailable");if(p){_pres=p.sendPresenceAvailable;dbg('init','Presence hook ready');}}catch(e){}
-      try{var s=findExport("sendConversationSeen");if(s){_seen=s.sendConversationSeen;dbg('init','ConversationSeen hook ready');}}catch(e){}
-      try{var pl=findExport("markPlayed");if(pl){_played=pl.markPlayed;dbg('init','markPlayed hook ready');}}catch(e){}
+      var fx=findExports(["markComposing","sendPresenceAvailable","sendPresenceUnavailable","sendConversationSeen","markPlayed"]);
+      _mods={comp:fx.markComposing,pres:fx.sendPresenceAvailable,unav:fx.sendPresenceUnavailable,seen:fx.sendConversationSeen,played:fx.markPlayed};
+      if(_mods.comp){_comp=orig(_mods.comp.markComposing);_rec=orig(_mods.comp.markRecording);dbg('init','Composing hooks ready');}
+      if(_mods.pres){_pres=orig(_mods.pres.sendPresenceAvailable);dbg('init','Presence hook ready');}
+      if(_mods.seen){_seen=orig(_mods.seen.sendConversationSeen);dbg('init','ConversationSeen hook ready');}
+      if(_mods.played){_played=orig(_mods.played.markPlayed);dbg('init','markPlayed hook ready');}
       return true;
     }catch(e){dbg('init','FATAL',e.message);return false;}
   }
@@ -408,10 +415,13 @@
   // ── Toggle features ───────────────────────────────────────
   function applyToggle(id,on){
     dbg('toggle',id+' → '+(on?'ON':'OFF'));
-    if(id==='hideTyping'){var c=findExport("markComposing");if(c&&_comp){if(on){c.markComposing=function(){};c.markRecording=function(){};dbg('toggle','Typing indicator hooked');}else{c.markComposing=_comp;if(_rec)c.markRecording=_rec;dbg('toggle','Typing indicator restored');}}else dbg('toggle','markComposing not available');}
-    if(id==='hideOnline'){var p=findExport("sendPresenceAvailable");if(p&&_pres){if(on){p.sendPresenceAvailable=function(){};if(!presInt){var u=findExport("sendPresenceUnavailable");if(u){presInt=setInterval(function(){try{u.sendPresenceUnavailable();}catch(e){}},1000);dbg('toggle','Presence set to unavailable (1s interval)');}}dbg('toggle','Online status hidden');}else{p.sendPresenceAvailable=_pres;if(presInt){clearInterval(presInt);presInt=null;}dbg('toggle','Online status restored');}}else dbg('toggle','sendPresenceAvailable not available');}
-    if(id==='disableReceipts'){var s=findExport("sendConversationSeen");if(s&&_seen){if(on){s.sendConversationSeen=function(){return Promise.resolve();};dbg('toggle','Read receipts disabled');}else{s.sendConversationSeen=_seen;dbg('toggle','Read receipts restored');}}else dbg('toggle','sendConversationSeen not available');}
-    if(id==='playAudioPrivate'){var pl=findExport("markPlayed");if(pl&&_played){if(on){pl.markPlayed=function(){};dbg('toggle','Audio play status hidden');}else{pl.markPlayed=_played;dbg('toggle','Audio play status restored');}}else dbg('toggle','markPlayed not available');}
+    // Replacements return a Promise like the originals, so WhatsApp's own .then() chains keep working
+    try{
+    if(id==='hideTyping'){var c=_mods.comp;if(c&&_comp){if(on){c.markComposing=noop(_comp);if(_rec)c.markRecording=noop(_rec);dbg('toggle','Typing indicator hooked');}else{c.markComposing=_comp;if(_rec)c.markRecording=_rec;dbg('toggle','Typing indicator restored');}}else dbg('toggle','markComposing not available');}
+    if(id==='hideOnline'){var p=_mods.pres;if(p&&_pres){if(on){p.sendPresenceAvailable=noop(_pres);if(!presInt){var u=_mods.unav;if(u){presInt=setInterval(function(){try{var r=u.sendPresenceUnavailable();if(r&&r.catch)r.catch(function(){});}catch(e){}},1000);dbg('toggle','Presence set to unavailable (1s interval)');}}dbg('toggle','Online status hidden');}else{p.sendPresenceAvailable=_pres;if(presInt){clearInterval(presInt);presInt=null;}dbg('toggle','Online status restored');}}else dbg('toggle','sendPresenceAvailable not available');}
+    if(id==='disableReceipts'){var s=_mods.seen;if(s&&_seen){if(on){s.sendConversationSeen=noop(_seen);dbg('toggle','Read receipts disabled');}else{s.sendConversationSeen=_seen;dbg('toggle','Read receipts restored');}}else dbg('toggle','sendConversationSeen not available');}
+    if(id==='playAudioPrivate'){var pl=_mods.played;if(pl&&_played){if(on){pl.markPlayed=noop(_played);dbg('toggle','Audio play status hidden');}else{pl.markPlayed=_played;dbg('toggle','Audio play status restored');}}else dbg('toggle','markPlayed not available');}
+    }catch(e){dbg('toggle',id+' failed: '+e.message);}
     // Blur: inject/remove <style> tags — CSS auto-applies to all elements including new ones
     var sidebarPreview='#pane-side [data-testid="cell-frame-secondary"] > :first-child';
     // Message bubbles: current WhatsApp marks them with data-testid="msg-container"
@@ -1029,10 +1039,10 @@
     ['wplus-css-blurMessages','wplus-css-blurContacts','wplus-css-blurPhotos','wplus-css-blurAvatar','wplus-css'].forEach(function(id){var e=document.getElementById(id);if(e)e.remove();});
 
     // Restore original WhatsApp functions
-    try{var c=findExport("markComposing");if(c&&_comp){c.markComposing=_comp;if(_rec)c.markRecording=_rec;}}catch(e){}
-    try{var p=findExport("sendPresenceAvailable");if(p&&_pres)p.sendPresenceAvailable=_pres;}catch(e){}
-    try{var s=findExport("sendConversationSeen");if(s&&_seen)s.sendConversationSeen=_seen;}catch(e){}
-    try{var pl=findExport("markPlayed");if(pl&&_played)pl.markPlayed=_played;}catch(e){}
+    try{if(_mods.comp&&_comp){_mods.comp.markComposing=_comp;if(_rec)_mods.comp.markRecording=_rec;}}catch(e){}
+    try{if(_mods.pres&&_pres)_mods.pres.sendPresenceAvailable=_pres;}catch(e){}
+    try{if(_mods.seen&&_seen)_mods.seen.sendConversationSeen=_seen;}catch(e){}
+    try{if(_mods.played&&_played)_mods.played.markPlayed=_played;}catch(e){}
 
     // Remove ALL UI elements
     ['wplus-btn','wplus-panel','wplus-header-restore','wplus-css','wplus-style'].forEach(function(id){var e=document.getElementById(id);if(e)e.remove();});
