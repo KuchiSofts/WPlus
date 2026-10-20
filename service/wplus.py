@@ -27,7 +27,9 @@ else:
     BUNDLE_DIR = EXE_DIR
 
 DATA_DIR = os.path.join(EXE_DIR, "data")
-ASSETS_DIR = os.path.join(EXE_DIR, "assets")
+# Bundled assets live in _MEIPASS when frozen (--add-data "assets/icon-64.png;assets")
+ASSETS_DIR = next((d for d in (os.path.join(BUNDLE_DIR, "assets"), os.path.join(EXE_DIR, "assets"))
+                   if os.path.isdir(d)), os.path.join(BUNDLE_DIR, "assets"))
 
 # ── First Run Setup ──────────────────────────────────────────
 CDP_PORT = 9222
