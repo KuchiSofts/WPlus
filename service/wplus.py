@@ -587,28 +587,29 @@ def set_startup(enable):
 
 # ── Single Instance ──────────────────────────────────────────
 def kill_old_instances():
-    """Kill any existing WPlus.exe processes (except current)"""
-    my_pid = os.getpid()
+    """Stop previous WPlus instances only: WPlus.exe processes and python/pythonw
+    processes whose command line runs wplus.py (or the old wplus_service.pyw).
+    Never touches unrelated Python processes, this process or its parent
+    (the PyInstaller onefile bootloader is also named WPlus.exe)."""
+    keep = f"{os.getpid()},{os.getppid()}"
+    ps = (
+        f"$keep=@({keep}); "
+        "Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { "
+        "$keep -notcontains $_.ProcessId -and ("
+        "$_.Name -eq 'WPlus.exe' -or "
+        "(($_.Name -eq 'python.exe' -or $_.Name -eq 'pythonw.exe') -and "
+        "$_.CommandLine -match '[\\\\/]wplus(_service)?\\.pyw?\"?(\\s|$)')) } | "
+        "ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue; 'killed:' + $_.ProcessId }"
+    )
     try:
-        r = subprocess.run(["powershell", "-Command",
-            f"Get-Process -Name 'WPlus' -ErrorAction SilentlyContinue | "
-            f"Where-Object {{ $_.Id -ne {my_pid} }} | "
-            f"ForEach-Object {{ Stop-Process -Id $_.Id -Force; 'killed:' + $_.Id }}"],
-            capture_output=True, text=True, timeout=10,
+        r = subprocess.run(["powershell", "-NoProfile", "-Command", ps],
+            capture_output=True, text=True, timeout=15,
             creationflags=subprocess.CREATE_NO_WINDOW)
         killed = [l for l in r.stdout.strip().split("\n") if l.startswith("killed:")]
         if killed:
             time.sleep(1)  # Wait for old process to fully exit
             return len(killed)
-    except: pass
-    # Also kill pythonw running wplus_service
-    try:
-        subprocess.run(["powershell", "-Command",
-            f"Get-Process -Name 'pythonw' -ErrorAction SilentlyContinue | "
-            f"Where-Object {{ $_.Id -ne {my_pid} }} | Stop-Process -Force"],
-            capture_output=True, text=True, timeout=5,
-            creationflags=subprocess.CREATE_NO_WINDOW)
-    except: pass
+    except Exception: pass
     return 0
 
 # ── Entry Point ──────────────────────────────────────────────
