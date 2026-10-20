@@ -11,7 +11,7 @@ Single exe that contains everything:
 
 On first run, creates data/ folder structure.
 """
-import sys, os, json, http.client, time, subprocess, threading, base64, tempfile, ssl
+import sys, os, json, http.client, time, subprocess, threading, base64, tempfile, ssl, secrets
 
 CURRENT_VERSION = "2.0.0"
 GITHUB_REPO = "KuchiSofts/WPlus"
@@ -88,64 +88,35 @@ def setup():
                 with open(dst, "w", encoding="utf-8") as f: f.write(content)
             except: pass
 
-    # Extract fileserver.py
-    src_fs = os.path.join(BUNDLE_DIR, "fileserver.py")
-    if os.path.exists(src_fs):
-        try:
-            with open(src_fs, "r", encoding="utf-8") as f: content = f.read()
-            # Patch DATA_DIR to point to exe directory
-            content = content.replace(
-                'os.path.dirname(os.path.dirname(os.path.abspath(__file__)))',
-                f'r"{EXE_DIR}"'
-            ).replace(
-                'os.path.dirname(os.path.abspath(__file__))',
-                f'r"{EXE_DIR}"'
-            )
-            dst_fs = os.path.join(EXE_DIR, "_fileserver.py")
-            with open(dst_fs, "w", encoding="utf-8") as f: f.write(content)
-        except: pass
+    # Older versions wrote a patched copy of the file server next to the exe
+    try: os.remove(os.path.join(EXE_DIR, "_fileserver.py"))
+    except OSError: pass
 
 setup()
 
 # ── File Server ──────────────────────────────────────────────
-# Import the extracted fileserver
-sys.path.insert(0, EXE_DIR)
+# Source mode: fileserver.py sits next to this file in service/.
+# Frozen mode: PyInstaller bundles it as a module (or via --add-data into _MEIPASS).
+FILE_SERVER_PORT = 18733
+SERVER_TOKEN = secrets.token_urlsafe(32)  # Per-session secret shared with the injected JS
+fileserver, fileserver_error = None, None
+for _dir in (os.path.dirname(os.path.abspath(__file__)), BUNDLE_DIR):
+    if _dir not in sys.path: sys.path.insert(0, _dir)
 try:
-    # Try importing the patched version
-    import importlib.util
-    spec = importlib.util.spec_from_file_location("fileserver", os.path.join(EXE_DIR, "_fileserver.py"))
-    if spec and spec.loader:
+    import fileserver
+except Exception as e:
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("fileserver", os.path.join(BUNDLE_DIR, "fileserver.py"))
         fileserver = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(fileserver)
-        start_file_server = fileserver.start_server
-    else:
-        raise ImportError("No fileserver")
-except:
-    # Fallback: inline minimal file server
-    from http.server import HTTPServer, BaseHTTPRequestHandler
-    class MinHandler(BaseHTTPRequestHandler):
-        def log_message(self, *a): pass
-        def do_OPTIONS(self):
-            self.send_response(200)
-            self.send_header("Access-Control-Allow-Origin", "*")
-            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-            self.send_header("Access-Control-Allow-Headers", "Content-Type")
-            self.end_headers()
-        def do_GET(self):
-            self.send_response(200)
-            self.send_header("Content-Type","application/json")
-            self.send_header("Access-Control-Allow-Origin","*")
-            self.end_headers()
-            self.wfile.write(b"[]")
-        def do_POST(self):
-            self.send_response(200)
-            self.send_header("Content-Type","application/json")
-            self.send_header("Access-Control-Allow-Origin","*")
-            self.end_headers()
-            self.wfile.write(b'{"ok":true}')
-    def start_file_server(port):
-        s = HTTPServer(("127.0.0.1", port), MinHandler)
-        threading.Thread(target=s.serve_forever, daemon=True).start()
+    except Exception as e2:
+        fileserver, fileserver_error = None, f"{e} / {e2}"
+
+def start_file_server(port):
+    if fileserver is None:
+        raise RuntimeError(f"fileserver module not found ({fileserver_error})")
+    fileserver.start_server(port, data_dir=DATA_DIR, token=SERVER_TOKEN)
 
 # ── Tray Icon ────────────────────────────────────────────────
 from PIL import Image, ImageDraw, ImageFont
@@ -262,7 +233,8 @@ def inject(ws_url):
     ui_path = os.path.join(EXE_DIR, "ui.js")
     with open(engine_path, "r", encoding="utf-8") as f: engine = f.read()
     with open(ui_path, "r", encoding="utf-8") as f: ui = f.read()
-    result = cdp_eval(ws_url, engine + ";\n" + ui)
+    token = f"window.__WPLUS_TOKEN__={json.dumps(SERVER_TOKEN)};\n"
+    result = cdp_eval(ws_url, token + engine + ";\n" + ui)
     return result == "ok", restored
 
 def uninject(ws_url):
@@ -438,8 +410,8 @@ def service_loop():
         f.write(f"[WPlus] Session started {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
 
     try:
-        start_file_server(18733)
-        log("File server on port 18733")
+        start_file_server(FILE_SERVER_PORT)
+        log(f"File server on port {FILE_SERVER_PORT}")
     except Exception as e:
         log(f"File server: {e}")
 

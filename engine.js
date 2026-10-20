@@ -89,19 +89,26 @@
 
   // ── File Server API (localhost:18733) ────────────────────
   var SERVER='http://127.0.0.1:18733';
-  function serverPost(path,data){
+  // Per-session token set by the WPlus service at injection time — the server rejects requests without it
+  var TOKEN=window.__WPLUS_TOKEN__||'';
+  try{delete window.__WPLUS_TOKEN__;}catch(e){}
+  function serverPost(path,data,cb){
     try{
-      fetch(SERVER+path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)})
+      fetch(SERVER+path,{method:'POST',headers:{'Content-Type':'application/json','X-WPlus-Token':TOKEN},body:JSON.stringify(data)})
       .then(function(r){return r.json();})
-      .then(function(r){dbg('server',path+' → '+JSON.stringify(r));})
+      .then(function(r){dbg('server',path+' → '+JSON.stringify(r));if(cb)cb(r);})
       .catch(function(e){dbg('server',path+' error: '+e.message);});
     }catch(e){dbg('server','fetch error: '+e.message);}
   }
   function serverGet(path,cb){
     try{
-      fetch(SERVER+path).then(function(r){return r.json();}).then(cb)
+      fetch(SERVER+path,{headers:{'X-WPlus-Token':TOKEN}}).then(function(r){return r.json();}).then(cb)
       .catch(function(e){dbg('server','GET '+path+' error');if(cb)cb(null);});
     }catch(e){if(cb)cb(null);}
+  }
+  // URL for a saved media file (data-relative path like "Images/x.jpg")
+  function mediaUrl(rel){
+    return SERVER+'/media/'+String(rel).split('/').map(encodeURIComponent).join('/')+'?t='+encodeURIComponent(TOKEN);
   }
 
   // ── Module finder ─────────────────────────────────────────
@@ -753,6 +760,7 @@
   window.__wplus.applyToggle=applyToggle;
   window.__wplus.goToMessage=goToMessage;
   window.__wplus.showMedia=showMedia;
+  window.__wplus.mediaUrl=mediaUrl;
   window.__wplus.forceRestoreCurrentChat=forceRestoreCurrentChat;
   window.__wplus.exportContacts=function(){
     if(!CON){alert('Loading...');return;}var cs=[];

@@ -382,8 +382,8 @@
     var mimeMap={image:'image/jpeg',video:'video/mp4',ptt:'audio/ogg',audio:'audio/mpeg',sticker:'image/webp'};
 
     // Priority 1: file on disk (served by file server)
-    if(m.mediaFile){
-      mediaUrl='http://127.0.0.1:18733/media/'+m.mediaFile;
+    if(m.mediaFile&&W.mediaUrl){
+      mediaUrl=W.mediaUrl(m.mediaFile);
     }
     // Priority 2: data URL in media field
     else if(m.media&&m.media.length>50){
