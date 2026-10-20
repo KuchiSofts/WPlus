@@ -607,8 +607,13 @@ def set_startup(enable):
     try:
         key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, STARTUP_KEY, 0, winreg.KEY_WRITE)
         if enable:
-            exe_path = sys.executable if getattr(sys, 'frozen', False) else os.path.abspath(__file__)
-            winreg.SetValueEx(key, STARTUP_NAME, 0, winreg.REG_SZ, f'"{exe_path}"')
+            if getattr(sys, 'frozen', False):
+                cmd = f'"{sys.executable}"'
+            else:
+                # Source mode: run the script with pythonw so no console window opens
+                pyw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
+                cmd = f'"{pyw if os.path.exists(pyw) else sys.executable}" "{os.path.abspath(__file__)}"'
+            winreg.SetValueEx(key, STARTUP_NAME, 0, winreg.REG_SZ, cmd)
         else:
             try: winreg.DeleteValue(key, STARTUP_NAME)
             except: pass
