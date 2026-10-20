@@ -363,13 +363,19 @@
     if(id==='playAudioPrivate'){var pl=findExport("markPlayed");if(pl&&_played){if(on){pl.markPlayed=function(){};dbg('toggle','Audio play status hidden');}else{pl.markPlayed=_played;dbg('toggle','Audio play status restored');}}else dbg('toggle','markPlayed not available');}
     // Blur: inject/remove <style> tags — CSS auto-applies to all elements including new ones
     var sidebarPreview='#pane-side [data-testid="cell-frame-secondary"] > :first-child';
+    // Message bubbles: current WhatsApp marks them with data-testid="msg-container"
+    // (the old .message-in/.message-out classes are gone); text spans can be nested.
+    var bubble='#main [data-testid="msg-container"]';
+    var bubbleText=bubble+' [data-testid~="selectable-text"]';
     var blurCSS={
       blurMessages:[
         // Message text in bubbles (chat area only)
+        bubbleText,
         '.message-in .copyable-text','.message-out .copyable-text',
         // Chat list message preview text
         '._ak8k',sidebarPreview,
         // Media in messages (blob images >80px = photos, NOT emojis/reactions)
+        bubble+' img[src^="blob:"]',bubble+' img[src^="data:image/jpeg"]',bubble+' video',
         '.message-in img[src^="blob:"]','.message-out img[src^="blob:"]',
         '.message-in img[src^="data:image/jpeg"]','.message-out img[src^="data:image/jpeg"]',
         '.message-in video','.message-out video'
@@ -378,6 +384,7 @@
         // Contact names in chat list
         'span[title][dir]',
         // Sender names in group messages (colored)
+        bubble+' [data-testid="author"]',
         'span._ahxt',
         // Chat header name
         'header span[dir="auto"]','header span.x1iyjqo2',
@@ -396,7 +403,11 @@
         // CDN avatars and sidebar avatars, including blob/data URLs
         'img[src*=".whatsapp.net/v/t61"]',
         'img[src*="pps.whatsapp.net"]',
-        '#pane-side [data-testid="cell-frame-container"] > :first-child img'
+        '#pane-side [data-testid="cell-frame-container"] > :first-child img',
+        // Avatars with a status ring or a badge (disappearing messages, group, etc.)
+        // are drawn as a masked SVG <image>, not an <img> — blur the whole SVG
+        'svg:has(image[*|href*=".whatsapp.net/"])',
+        '#pane-side [data-testid="cell-frame-container"] > :first-child svg:has(image)'
       ]
     };
     // Build CSS — add blur + hover-reveal, exclude tiny images (<25px = emojis/reactions/icons)
@@ -412,6 +423,9 @@
     });
     // Avoid stacked filters so hovering the preview reveals all of its text.
     _builtCSS.blurMessages+=sidebarPreview+' *{filter:none!important}';
+    // Same for nested text spans in a bubble, and reveal the whole bubble on hover.
+    _builtCSS.blurMessages+=bubbleText+' [data-testid~="selectable-text"]{filter:none!important}'+
+      bubble+':hover [data-testid~="selectable-text"],'+bubble+':hover img,'+bubble+':hover video{filter:none!important}';
     if(_builtCSS[id]){
       var styleId='wplus-css-'+id;
       var existing=document.getElementById(styleId);
