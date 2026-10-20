@@ -1,6 +1,6 @@
 // WPlus UI — github.com/KuchiSofts — MIT
 (function(){
-  ['wplus-btn','wplus-panel','wplus-css'].forEach(function(id){var e=document.getElementById(id);if(e)e.remove();});
+  ['wplus-btn','wplus-panel','wplus-css','wplus-scroll-up','wplus-header-restore','wplus-preview','wplus-media-viewer'].forEach(function(id){var e=document.getElementById(id);if(e)e.remove();});
   var W=window.__wplus||{};
   function cfg(k){try{return(JSON.parse(localStorage.getItem('wplus_cfg')||'{}')||{})[k]||false;}catch(e){return false;}}
   function cfgRaw(k){try{return(JSON.parse(localStorage.getItem('wplus_cfg')||'{}')||{})[k];}catch(e){return undefined;}}
@@ -198,13 +198,14 @@
 
   btn.onclick=function(e){e.stopPropagation();var isOpen=P.classList.contains('open');isOpen?close():open();uiLog(isOpen?'Panel CLOSED':'Panel OPENED');};
   document.getElementById('wp-x').onclick=function(){close();uiLog('Panel closed (back)');};
-  document.addEventListener('click',function(e){
+  function onDocClick(e){
     if(!P.classList.contains('open'))return;
     if(P.contains(e.target)||btn.contains(e.target))return;
     var preview=document.getElementById('wplus-preview');
     if(preview&&preview.contains(e.target))return;
     close();
-  });
+  }
+  document.addEventListener('click',onDocClick);
   window.addEventListener('wplus-update',refresh);
 
   P.querySelectorAll('.wpp-tg').forEach(function(el){el.onclick=function(e){e.stopPropagation();var id=this.dataset.t,on=!this.classList.contains('on');this.classList.toggle('on');setCfg(id,on);if(W.applyToggle)W.applyToggle(id,on);localStorage.setItem('wplus_sync_now','1');uiLog('Toggle: '+id+' → '+(on?'ON':'OFF'));};});
@@ -495,6 +496,8 @@
   }
 
   // ── Fullscreen Media Viewer (image zoom + video player) ──
+  var _esc=null;
+  function closeViewer(){var v=document.getElementById('wplus-media-viewer');if(v)v.remove();if(_esc){document.removeEventListener('keydown',_esc);_esc=null;}}
   function openMediaViewer(dataUrl,type,sender,time){
     uiLog('Media viewer opened',{type:type,sender:sender,srcLen:dataUrl?dataUrl.length:0,isBlob:dataUrl?dataUrl.indexOf('blob:')===0:false,isData:dataUrl?dataUrl.indexOf('data:')===0:false,isHttp:dataUrl?dataUrl.indexOf('http')===0:false});
     var oldViewer=document.getElementById('wplus-media-viewer');
@@ -528,7 +531,7 @@
     closeBtn.textContent='\u{2715}';
     closeBtn.onmouseenter=function(){this.style.background='rgba(255,255,255,.1)';};
     closeBtn.onmouseleave=function(){this.style.background='transparent';};
-    closeBtn.onclick=function(){viewer.remove();};
+    closeBtn.onclick=closeViewer;
     topBar.appendChild(closeBtn);
     viewer.appendChild(topBar);
 
@@ -623,12 +626,11 @@
 
     viewer.appendChild(container);
 
-    // Click background to close (not on media)
-    viewer.onclick=function(e){if(e.target===viewer||e.target===container)viewer.remove();};
-
-    // Escape key to close
-    var escHandler=function(e){if(e.key==='Escape'){viewer.remove();document.removeEventListener('keydown',escHandler);}};
-    document.addEventListener('keydown',escHandler);
+    // Click background / close button / Escape all go through closeViewer, which drops the key listener
+    viewer.onclick=function(e){if(e.target===viewer||e.target===container)closeViewer();};
+    if(_esc)document.removeEventListener('keydown',_esc);
+    _esc=function(e){if(e.key==='Escape')closeViewer();};
+    document.addEventListener('keydown',_esc);
 
     document.body.appendChild(viewer);
   }
@@ -675,13 +677,13 @@
   }
 
   // Check after 15 seconds
-  setTimeout(checkForUpdate,15000);
+  var updT=setTimeout(checkForUpdate,15000);
 
   // ── Sidebar icon positioning ───────────────────────────
   function pos(){var mb=null;document.querySelectorAll('button,[role=button]').forEach(function(e){if(e.getBoundingClientRect().left<60&&(e.title==='Media'||e.ariaLabel==='Media'))mb=e;});
     if(mb){var r=mb.getBoundingClientRect();btn.style.top=(r.top-48)+'px';btn.style.left=Math.round(r.left)+'px';}
     else{var a=[];document.querySelectorAll('button,[role=button]').forEach(function(e){var br=e.getBoundingClientRect();if(br.left<60&&br.width>20&&br.width<55&&br.height>20)a.push({y:br.top,x:br.left});});a.sort(function(p,q){return p.y-q.y;});if(a.length>=3){var t=a[a.length-3];btn.style.top=(t.y-48)+'px';btn.style.left=Math.round(t.x)+'px';}}}
-  pos();window.addEventListener('resize',pos);setInterval(pos,10000); // Check every 10s instead of 3s
+  pos();window.addEventListener('resize',pos);var posInt=setInterval(pos,10000); // Check every 10s instead of 3s
 
   // ── Chat header restore button ────────────────────────
   var restoreSvg='<svg viewBox="0 0 24 24"><path d="M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4zm-1 16v-2h2v2h-2zm0-4V7h2v6h-2z"/></svg>';
@@ -750,10 +752,11 @@
 
   // Watch for chat changes — inject header button + position scroll-up
   var _injDebounce=null;
-  new MutationObserver(function(){
+  var mo=new MutationObserver(function(){
     if(_injDebounce)clearTimeout(_injDebounce);
-    _injDebounce=setTimeout(function(){injectRestoreBtn();checkScrollUp();},500);
-  }).observe(document.getElementById('app')||document.body,{childList:true,subtree:true});
+    _injDebounce=setTimeout(function(){_injDebounce=null;injectRestoreBtn();checkScrollUp();},500);
+  });
+  mo.observe(document.getElementById('app')||document.body,{childList:true,subtree:true});
   injectRestoreBtn();
 
   // ── Scroll Up / Load Older Messages button ────────────
@@ -844,6 +847,13 @@
     scrollUpBtn.style.display=hasChat?'flex':'none';
   }
   checkScrollUp();
+
+  // Engine cleanup() calls this: drop every listener, observer and timer the UI added
+  if(W.onCleanup)W.onCleanup(function(){
+    document.removeEventListener('click',onDocClick);window.removeEventListener('wplus-update',refresh);window.removeEventListener('resize',pos);
+    clearInterval(posInt);clearTimeout(updT);if(_injDebounce)clearTimeout(_injDebounce);mo.disconnect();closeViewer();
+    [btn,P,scrollUpBtn,css].forEach(function(e){if(e&&e.parentNode)e.parentNode.removeChild(e);});
+  });
 
   return'ok';
 })();

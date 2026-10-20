@@ -9,6 +9,10 @@
   var CC=null,CON=null,GRP=null;
   var _comp,_rec,_pres,_seen,_played,_mods={};
   var presInt=null;
+  // Lifecycle: everything added to WhatsApp is tracked so cleanup() can take it all back
+  var dead=false,_subs=[],_cols=[],_timers={},_onCleanup=[];
+  function listen(col,ev,fn){col.on(ev,fn);_subs.push([col,ev,fn]);}
+  function later(fn,ms){var id=setTimeout(function(){delete _timers[id];if(!dead)fn();},ms);_timers[id]=1;return id;}
 
   // ── Debug system ──────────────────────────────────────────
   // Off by default — the log contains message previews and phone numbers.
@@ -141,9 +145,12 @@
   window.__wplusBridgeReply=function(id,res){var c=_br.cb[id];delete _br.cb[id];if(c)c(res);};
   function hasBridge(){return typeof window.__wplusBridge==='function';}
   function bridge(method,path,body,cb){
-    var id=++_br.n;_br.cb[id]=cb;
+    var id=++_br.n;
+    // Give up on a reply that never comes, so callbacks do not pile up
+    var t=later(function(){var c=_br.cb[id];delete _br.cb[id];if(c)c(null);},120000);
+    _br.cb[id]=function(r){clearTimeout(t);delete _timers[t];cb(r);};
     try{window.__wplusBridge(JSON.stringify({id:id,method:method,path:path,body:body===undefined?null:body}));}
-    catch(e){delete _br.cb[id];cb(null);}
+    catch(e){var c=_br.cb[id];delete _br.cb[id];if(c)c(null);}
   }
   function serverPost(path,data,cb){
     if(hasBridge()){
@@ -240,11 +247,13 @@
     }catch(e){dbg('restore','Error: '+e.message);}
   }
 
-  function hookChat(chat){
-    if(!chat||!chat.msgs||chat.msgs.__wp)return;chat.msgs.__wp=true;
+  // Runs inside WhatsApp's collection 'add' — must never throw
+  function hookChat(chat){try{hookChatMsgs(chat);}catch(e){if(chat&&chat.msgs)delete chat.msgs.__wp;dbg('init','hookChat failed: '+e.message);}}
+  function hookChatMsgs(chat){
+    if(!chat||!chat.msgs||chat.msgs.__wp)return;chat.msgs.__wp=true;_cols.push(chat.msgs);
     var chatName=chat.__x_name||chat.__x_formattedTitle||(chat.id?chat.id.user:'?');
 
-    chat.msgs.on('add',function(msg){try{
+    listen(chat.msgs,'add',function(msg){try{
       if(!msg||!msg.isNewMsg||(msg.id&&msg.id.fromMe))return;
       var ok=['chat','image','video','ptt','audio','document','sticker','vcard','location'];
       if(ok.indexOf(msg.__x_type)===-1)return;
@@ -313,7 +322,7 @@
       if(isViewOnce){dbg('msg:new','VIEW-ONCE detected! Capturing...');captureViewOnce(msg);}
     }catch(e){dbg('msg:new','ERROR: '+e.message);}});
 
-    chat.msgs.on('change',function(msg){try{
+    listen(chat.msgs,'change',function(msg){try{
       if(!msg||msg.__x_type!=='revoked'||!msg.__x_backupType)return;
 
       var msgId=msg.__x_id?msg.__x_id._serialized:'?';
@@ -396,7 +405,7 @@
           // Try force-downloading via WhatsApp's internal API
           if(md&&typeof md.downloadMedia==='function'&&!md.__wplus_dl){
             md.__wplus_dl=true;
-            md.downloadMedia().then(function(){setTimeout(tryCapture,1000);}).catch(function(){});
+            md.downloadMedia().then(function(){later(tryCapture,1000);}).catch(function(){});
           }
         }catch(e){}return false;
       }
@@ -407,7 +416,7 @@
       saveEntry();
       // Multiple retry attempts — media may load at different times
       if(!tryCapture()){
-        [2000,5000,10000,20000,30000].forEach(function(d){setTimeout(tryCapture,d);});
+        [2000,5000,10000,20000,30000].forEach(function(d){later(tryCapture,d);});
       }
     }catch(e){}
   }
@@ -541,7 +550,7 @@
         var ctx=search.getSearchContext(chat,msgObj.__x_id||msgObj.id);
         Cmd.openChatAt({chat:chat,msgContext:ctx}).then(function(){
           // Flash highlight the message in the DOM
-          setTimeout(function(){
+          later(function(){
             try{
               var mid=msgObj.__x_id?msgObj.__x_id._serialized:'';
               var el=document.querySelector('[data-id="'+mid+'"]');
@@ -557,7 +566,7 @@
               if(el){
                 el.classList.add('wplus-msg-highlight');
                 el.scrollIntoView({behavior:'smooth',block:'center'});
-                setTimeout(function(){el.classList.remove('wplus-msg-highlight');},3000);
+                later(function(){el.classList.remove('wplus-msg-highlight');},3000);
                 dbg('nav','Message highlighted');
               }
             }catch(e){}
@@ -619,10 +628,10 @@
         dbg('nav','Chat has '+chat.msgs._models.length+' messages loaded, starting search');
         searchAndRestore(chat,saved,0);
       } else {
-        setTimeout(function(){waitForChatReady(attempts+1);},500);
+        later(function(){waitForChatReady(attempts+1);},500);
       }
     }
-    setTimeout(function(){waitForChatReady(0);},2000);
+    later(function(){waitForChatReady(0);},2000);
     return true;
   }
 
@@ -786,7 +795,7 @@
               fire('update');
               return;
             }
-            setTimeout(function(){loadAndRestore(attempt+1);},300);
+            later(function(){loadAndRestore(attempt+1);},300);
           }).catch(function(){
             if(callback)callback(totalRestored);
           });
@@ -802,7 +811,7 @@
   // ── Show media in overlay ─────────────────────────────────
   function showMedia(dataUrl, type){
     // Create fullscreen overlay
-    var overlay=document.createElement('div');
+    var overlay=document.createElement('div');overlay.className='wplus-ov';
     overlay.style.cssText='position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999999;background:rgba(0,0,0,.92);display:flex;align-items:center;justify-content:center;cursor:pointer';
     overlay.onclick=function(){overlay.remove();};
 
@@ -893,8 +902,8 @@
   // ── Boot ──────────────────────────────────────────────────
   var att=0;
   function boot(){
-    if(++att>120)return;if(!init()){setTimeout(boot,1000);return;}
-    (CC._models||[]).forEach(hookChat);CC.on('add',hookChat);
+    if(dead||++att>120)return;if(!init()){later(boot,1000);return;}
+    (CC._models||[]).forEach(hookChat);listen(CC,'add',hookChat);
     // ── Smart Restore System ─────────────────────────────────
     // IDs change between sessions — match by sender+time or exact ID
     var restoredSet=new Set();
@@ -977,10 +986,9 @@
     }
 
     // Watch for messages loading when user opens chats
-    function watchChat(ch){
+    function watchChat(ch){try{
       if(!ch||!ch.msgs||ch.msgs.__wpR)return;
-      ch.msgs.__wpR=true;
-      ch.msgs.on('add',function(msg){
+      listen(ch.msgs,'add',function(msg){
         try{
           if(!msg||msg.__x_type!=='revoked')return;
           var saved=matchSaved(msg,ch);
@@ -990,21 +998,22 @@
           }
         }catch(e){}
       });
-    }
+      ch.msgs.__wpR=true;_cols.push(ch.msgs);
+    }catch(e){dbg('restore','watchChat failed: '+e.message);}}
     (CC._models||[]).forEach(watchChat);
-    CC.on('add',watchChat);
+    listen(CC,'add',watchChat);
 
     // Try restore once at boot (same-session messages only)
     doRestore();
-    setTimeout(doRestore,5000);
+    later(doRestore,5000);
     dbg('restore','Live watcher active — new deletions will be caught instantly');
-    var S=settings();Object.keys(S).forEach(function(k){if(S[k]){dbg('boot','Applying setting: '+k);applyToggle(k,true);}});
+    var S=settings();Object.keys(S).forEach(function(k){if(S[k]){dbg('boot','Applying setting: '+k);try{applyToggle(k,true);}catch(e){}}});
     window.__wplus.ready=true;
     dbg('boot','READY — '+((CC._models||[]).length)+' chats, '+(CON?(CON._models||[]).length:0)+' contacts');
     fire('ready');
 
     // Migrate old messages — save their media to disk files
-    setTimeout(function(){serverPost('/migrate',{});},5000);
+    later(function(){serverPost('/migrate',{});},5000);
   }
 
   // Debug API
@@ -1031,9 +1040,17 @@
   };
 
   // Full cleanup — restores WhatsApp to original state
+  window.__wplus.onCleanup=function(fn){if(typeof fn==='function')_onCleanup.push(fn);};
   window.__wplus.cleanup=function(){
+    dead=true;
     // Stop timers
     if(presInt){clearInterval(presInt);presInt=null;}
+    Object.keys(_timers).forEach(function(id){clearTimeout(+id);});_timers={};
+    // Remove every collection listener and the "already hooked" markers
+    _subs.forEach(function(s){try{s[0].off(s[1],s[2]);}catch(e){}});_subs=[];
+    _cols.forEach(function(c){try{delete c.__wp;delete c.__wpR;}catch(e){}});_cols=[];
+    // UI teardown (listeners, observers, intervals registered by ui.js)
+    _onCleanup.forEach(function(fn){try{fn();}catch(e){}});_onCleanup=[];
 
     // Remove injected CSS
     ['wplus-css-blurMessages','wplus-css-blurContacts','wplus-css-blurPhotos','wplus-css-blurAvatar','wplus-css'].forEach(function(id){var e=document.getElementById(id);if(e)e.remove();});
@@ -1046,8 +1063,9 @@
 
     // Remove ALL UI elements
     ['wplus-btn','wplus-panel','wplus-header-restore','wplus-css','wplus-style'].forEach(function(id){var e=document.getElementById(id);if(e)e.remove();});
-    document.querySelectorAll('.wplus-restore-btn,.wplus-b,.wpp,[id*=wplus],.wplus-msg-highlight').forEach(function(e){e.remove();});
-    document.querySelectorAll('.wplus-blur-t,.wplus-blur-p').forEach(function(e){e.classList.remove('wplus-blur-t','wplus-blur-p');});
+    document.querySelectorAll('.wplus-restore-btn,.wplus-b,.wpp,.wplus-ov,[id*=wplus]').forEach(function(e){e.remove();});
+    // These classes sit on WhatsApp's own elements — remove the class, never the element
+    document.querySelectorAll('.wplus-blur-t,.wplus-blur-p,.wplus-msg-highlight').forEach(function(e){e.classList.remove('wplus-blur-t','wplus-blur-p','wplus-msg-highlight');});
     // Clear debug timer
     if(dbg._timer){clearTimeout(dbg._timer);dbg._timer=null;}
     // Release cached media blobs
@@ -1059,6 +1077,6 @@
     console.log('[WPlus] Uninjected — WhatsApp restored to original state');
   };
 
-  setTimeout(boot,3000);
+  later(boot,3000);
   dbg('boot','Engine v'+window.__wplus.version+' loaded');
 })();
