@@ -75,8 +75,21 @@
       var exists=d.some(function(m){return m.id===item.id;});
       if(!exists){d.push(item);if(d.length>MAX_MSGS)d=d.slice(-MAX_MSGS);LS.set('wplus_del',d);}
     }
-    if(action==='clear'){LS.del('wplus_del');}
+    if(action==='clear'){
+      LS.del('wplus_del');
+      ['wplus_deleted_msgs','wtplus_deleted_msgs','wtplus_del'].forEach(function(k){LS.del(k);});
+      serverPost('/deleted/clear',{});
+    }
     return d;
+  }
+
+  // Server saved the media to disk — keep only the file reference in localStorage
+  function noteMediaFile(id,r){
+    if(!r||!r.mediaFile)return;
+    var d=deletedMsgs('get');
+    for(var i=d.length-1;i>=0;i--){
+      if(d[i].id===id){d[i].mediaFile=r.mediaFile;delete d[i].media;LS.set('wplus_del',d);break;}
+    }
   }
 
   function viewOnce(action,item){
@@ -258,7 +271,7 @@
         text:msg.__x_backupText,caption:msg.__x_backupCaption,sender:sender,
         time:msg.__x_backupTime||Date.now(),chat:chatName,media:null};
 
-      serverPost('/msg/deleted',entry);
+      serverPost('/msg/deleted',entry,function(r){noteMediaFile(entry.id,r);});
       dbg('msg:del','Sent to file server for permanent storage');
 
       // Try to capture media blob for images/videos/audio
@@ -276,7 +289,7 @@
               var d=deletedMsgs('get');
               for(var i=d.length-1;i>=0;i--){if(d[i].id===entry.id){d[i].media=entry.media;d[i].mime=entry.mime;break;}}
               LS.set('wplus_del',d);
-              serverPost('/msg/deleted',entry);
+              serverPost('/msg/deleted',entry,function(r){noteMediaFile(entry.id,r);});
               dbg('msg:del','Media sent to file server');
             };
             reader.readAsDataURL(blob);

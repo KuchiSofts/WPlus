@@ -263,6 +263,9 @@ def detect_wa_change():
 
 def inject(ws_url):
     cdp_eval(ws_url, 'if(window.__wplus&&window.__wplus.cleanup)window.__wplus.cleanup()')
+    # Pull anything the page saved since the last sync before overwriting it with the file copy
+    try: sync_key(ws_url, "wplus_del", FILES["wplus_del"])
+    except Exception: pass
     restored = 0
     for key, path in FILES.items():
         data = load_file(path, "null")
@@ -287,16 +290,27 @@ def uninject(ws_url):
         })()''')
     except: pass
 
+def sync_key(ws_url, key, path):
+    """Copy one localStorage key to disk. Returns 1 if the file changed."""
+    val = cdp_eval(ws_url, f'localStorage.getItem("{key}")')
+    if not val or val == "null":
+        return 0
+    if key == "wplus_del" and fileserver is not None:
+        # deleted_messages.json is owned by the file server: merge the browser copy
+        # into it (keeps mediaFile, moves any base64 media to disk) instead of overwriting
+        try: entries = json.loads(val)
+        except ValueError: return 0
+        return 1 if fileserver.merge_deleted(entries) else 0
+    if val != load_file(path, ""):
+        save_file(path, val)
+        return 1
+    return 0
+
 def sync(ws_url):
     changes = 0
     cdp_eval(ws_url, '(function(){var f=localStorage.getItem("wplus_sync_now");if(f)localStorage.removeItem("wplus_sync_now");})()')
     for key, path in FILES.items():
-        val = cdp_eval(ws_url, f'localStorage.getItem("{key}")')
-        if val and val != "null":
-            current = load_file(path, "")
-            if val != current:
-                save_file(path, val)
-                changes += 1
+        changes += sync_key(ws_url, key, path)
     if not hasattr(sync, '_c'): sync._c = 0
     sync._c += 1
     if sync._c % 5 == 0:
