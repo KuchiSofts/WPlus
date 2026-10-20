@@ -30,33 +30,61 @@ DATA_DIR = os.path.join(EXE_DIR, "data")
 ASSETS_DIR = os.path.join(EXE_DIR, "assets")
 
 # ── First Run Setup ──────────────────────────────────────────
+CDP_PORT = 9222
+# WebView2 policy value names are matched against the host app's executable name,
+# so the debug port is only opened for WhatsApp — not for every WebView2 app.
+WA_EXE_NAMES = ("WhatsApp.Root.exe", "WhatsApp.exe")
+WEBVIEW2_POLICY_KEY = r"Software\Policies\Microsoft\Edge\WebView2\AdditionalBrowserArguments"
+# Our CDP client (PowerShell ClientWebSocket) sends no Origin header, so a specific
+# origin here is enough; it stops web pages from opening the DevTools socket.
+WEBVIEW2_ARGS = f"--remote-debugging-port={CDP_PORT} --remote-allow-origins=http://127.0.0.1:{CDP_PORT}"
+
+def _is_legacy_wplus_args(value):
+    """Matches the global value older WPlus versions wrote for ALL WebView2 apps."""
+    return isinstance(value, str) and f"--remote-debugging-port={CDP_PORT}" in value
+
+def _broadcast_env_change():
+    try:
+        import ctypes
+        ctypes.windll.user32.SendMessageTimeoutW(0xFFFF, 0x001A, 0, "Environment", 0x0002, 2000, None)
+    except Exception: pass
+
 def ensure_debug_port():
-    """Enable WebView2 debug port via registry (needed for CDP injection)"""
+    """Enable the WebView2 debug port for WhatsApp only (needed for CDP injection).
+    Also migrates the global '*' policy / environment variable set by older versions.
+    Returns True if anything changed (WhatsApp needs a restart)."""
     import winreg
-    key_path = r"Software\Policies\Microsoft\Edge\WebView2\AdditionalBrowserArguments"
-    value = "--remote-debugging-port=9222 --remote-allow-origins=*"
+    changed = False
     try:
-        # Check if already set
-        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_READ)
-        existing = winreg.QueryValueEx(key, "*")[0]
+        key = winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, WEBVIEW2_POLICY_KEY, 0,
+                                 winreg.KEY_READ | winreg.KEY_WRITE)
+        # Remove the old global value (applied to every WebView2 app)
+        try:
+            if _is_legacy_wplus_args(winreg.QueryValueEx(key, "*")[0]):
+                winreg.DeleteValue(key, "*")
+                changed = True
+        except OSError: pass
+        for exe in WA_EXE_NAMES:
+            try: existing = winreg.QueryValueEx(key, exe)[0]
+            except OSError: existing = None
+            if existing != WEBVIEW2_ARGS:
+                winreg.SetValueEx(key, exe, 0, winreg.REG_SZ, WEBVIEW2_ARGS)
+                changed = True
         winreg.CloseKey(key)
-        if "9222" in existing:
-            return False  # Already configured
-    except (FileNotFoundError, OSError):
-        pass
-    # Set registry key
+    except OSError: pass
+    # Remove the old user environment variable (also applied to every WebView2 app)
     try:
-        key = winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_WRITE)
-        winreg.SetValueEx(key, "*", 0, winreg.REG_SZ, value)
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment", 0,
+                             winreg.KEY_READ | winreg.KEY_WRITE)
+        try:
+            if _is_legacy_wplus_args(winreg.QueryValueEx(key, "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS")[0]):
+                winreg.DeleteValue(key, "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS")
+                _broadcast_env_change()
+                changed = True
+        except OSError: pass
         winreg.CloseKey(key)
-    except: pass
-    # Also set user environment variable as backup
-    try:
-        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment", 0, winreg.KEY_WRITE)
-        winreg.SetValueEx(key, "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", 0, winreg.REG_SZ, value)
-        winreg.CloseKey(key)
-    except: pass
-    return True  # Was first time — WhatsApp needs restart
+    except OSError: pass
+    return changed
 
 def setup():
     """Create folders, extract files, configure registry"""
@@ -150,7 +178,7 @@ def save_file(path, data):
 
 def get_wa_target():
     try:
-        c = http.client.HTTPConnection("127.0.0.1", 9222, timeout=3)
+        c = http.client.HTTPConnection("127.0.0.1", CDP_PORT, timeout=3)
         c.request("GET", "/json")
         targets = json.loads(c.getresponse().read())
         c.close()
