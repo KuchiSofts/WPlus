@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-WPlus v2.0 — Self-contained WhatsApp Desktop Plugin
+WPlus — Self-contained WhatsApp Desktop Plugin
 by KuchiSofts — github.com/KuchiSofts
 
 Single exe that contains everything:
@@ -11,9 +11,9 @@ Single exe that contains everything:
 
 On first run, creates data/ folder structure.
 """
-import sys, os, json, http.client, time, subprocess, threading, base64, tempfile, ssl
+import sys, os, json, http.client, time, subprocess, threading, base64, tempfile, ssl, secrets
 
-CURRENT_VERSION = "2.0.0"
+CURRENT_VERSION = "2.0.1"  # Keep in sync with engine.js and package.json
 GITHUB_REPO = "KuchiSofts/WPlus"
 
 # ── Path Setup ───────────────────────────────────────────────
@@ -27,36 +27,111 @@ else:
     BUNDLE_DIR = EXE_DIR
 
 DATA_DIR = os.path.join(EXE_DIR, "data")
-ASSETS_DIR = os.path.join(EXE_DIR, "assets")
+# Bundled assets live in _MEIPASS when frozen (--add-data "assets/icon-64.png;assets")
+ASSETS_DIR = next((d for d in (os.path.join(BUNDLE_DIR, "assets"), os.path.join(EXE_DIR, "assets"))
+                   if os.path.isdir(d)), os.path.join(BUNDLE_DIR, "assets"))
 
 # ── First Run Setup ──────────────────────────────────────────
-def ensure_debug_port():
-    """Enable WebView2 debug port via registry (needed for CDP injection)"""
+CDP_PORT = 9222
+# WebView2 policy value names are matched against the host app's executable name,
+# so the debug port is only opened for WhatsApp — not for every WebView2 app.
+WA_EXE_NAMES = ("WhatsApp.Root.exe", "WhatsApp.exe")
+WEBVIEW2_POLICY_KEY = r"Software\Policies\Microsoft\Edge\WebView2\AdditionalBrowserArguments"
+# Our CDP client (PowerShell ClientWebSocket) sends no Origin header, so a specific
+# origin here is enough; it stops web pages from opening the DevTools socket.
+WEBVIEW2_ARGS = f"--remote-debugging-port={CDP_PORT} --remote-allow-origins=http://127.0.0.1:{CDP_PORT}"
+
+def _is_legacy_wplus_args(value):
+    """Matches the global value older WPlus versions wrote for ALL WebView2 apps."""
+    return isinstance(value, str) and f"--remote-debugging-port={CDP_PORT}" in value
+
+def _broadcast_env_change():
+    try:
+        import ctypes
+        ctypes.windll.user32.SendMessageTimeoutW(0xFFFF, 0x001A, 0, "Environment", 0x0002, 2000, None)
+    except Exception: pass
+
+def _hklm_policy_ok():
+    """True if the machine-wide policy already opens the debug port for WhatsApp."""
     import winreg
-    key_path = r"Software\Policies\Microsoft\Edge\WebView2\AdditionalBrowserArguments"
-    value = "--remote-debugging-port=9222 --remote-allow-origins=*"
     try:
-        # Check if already set
-        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_READ)
-        existing = winreg.QueryValueEx(key, "*")[0]
-        winreg.CloseKey(key)
-        if "9222" in existing:
-            return False  # Already configured
-    except (FileNotFoundError, OSError):
-        pass
-    # Set registry key
+        key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, WEBVIEW2_POLICY_KEY, 0, winreg.KEY_READ)
+        try: return all(winreg.QueryValueEx(key, exe)[0] == WEBVIEW2_ARGS for exe in WA_EXE_NAMES)
+        finally: winreg.CloseKey(key)
+    except OSError:
+        return False
+
+def _set_hklm_policy():
+    """Write the machine-wide policy through one elevated (UAC) PowerShell call.
+    WebView2 150+ ignores the HKCU policy and the environment variable in many setups,
+    so HKLM is the only reliable place. Returns True if the policy is in place afterwards."""
+    import ctypes
+    from ctypes import wintypes
+    names = ",".join(f"'{n}'" for n in WA_EXE_NAMES)
+    script = (f"$k='HKLM:\\{WEBVIEW2_POLICY_KEY}'; New-Item -Path $k -Force | Out-Null; "
+              f"foreach($n in {names}){{ New-ItemProperty -Path $k -Name $n -Value '{WEBVIEW2_ARGS}' -PropertyType String -Force | Out-Null }}")
+
+    class SHELLEXECUTEINFOW(ctypes.Structure):
+        _fields_ = [("cbSize", wintypes.DWORD), ("fMask", wintypes.ULONG), ("hwnd", wintypes.HWND),
+                    ("lpVerb", wintypes.LPCWSTR), ("lpFile", wintypes.LPCWSTR), ("lpParameters", wintypes.LPCWSTR),
+                    ("lpDirectory", wintypes.LPCWSTR), ("nShow", ctypes.c_int), ("hInstApp", wintypes.HINSTANCE),
+                    ("lpIDList", ctypes.c_void_p), ("lpClass", wintypes.LPCWSTR), ("hkeyClass", wintypes.HKEY),
+                    ("dwHotKey", wintypes.DWORD), ("hIcon", wintypes.HANDLE), ("hProcess", wintypes.HANDLE)]
+    info = SHELLEXECUTEINFOW()
+    info.cbSize = ctypes.sizeof(info)
+    info.fMask = 0x40  # SEE_MASK_NOCLOSEPROCESS
+    info.lpVerb = "runas"
+    info.lpFile = "powershell.exe"
+    info.lpParameters = f'-NoProfile -WindowStyle Hidden -Command "{script}"'
+    info.nShow = 0
     try:
-        key = winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_WRITE)
-        winreg.SetValueEx(key, "*", 0, winreg.REG_SZ, value)
-        winreg.CloseKey(key)
-    except: pass
-    # Also set user environment variable as backup
+        if not ctypes.windll.shell32.ShellExecuteExW(ctypes.byref(info)):
+            return False  # UAC prompt declined
+        ctypes.windll.kernel32.WaitForSingleObject(info.hProcess, 30000)
+        ctypes.windll.kernel32.CloseHandle(info.hProcess)
+    except Exception:
+        return False
+    return _hklm_policy_ok()
+
+def ensure_debug_port():
+    """Enable the WebView2 debug port for WhatsApp only (needed for CDP injection).
+    Also migrates the global '*' policy / environment variable set by older versions.
+    Returns True if anything changed (WhatsApp needs a restart)."""
+    import winreg
+    changed = False
+    # Machine-wide policy first: the only one current WebView2 runtimes honor everywhere
+    if not _hklm_policy_ok() and _set_hklm_policy():
+        changed = True
     try:
-        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment", 0, winreg.KEY_WRITE)
-        winreg.SetValueEx(key, "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", 0, winreg.REG_SZ, value)
+        key = winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, WEBVIEW2_POLICY_KEY, 0,
+                                 winreg.KEY_READ | winreg.KEY_WRITE)
+        # Remove the old global value (applied to every WebView2 app)
+        try:
+            if _is_legacy_wplus_args(winreg.QueryValueEx(key, "*")[0]):
+                winreg.DeleteValue(key, "*")
+                changed = True
+        except OSError: pass
+        for exe in WA_EXE_NAMES:
+            try: existing = winreg.QueryValueEx(key, exe)[0]
+            except OSError: existing = None
+            if existing != WEBVIEW2_ARGS:
+                winreg.SetValueEx(key, exe, 0, winreg.REG_SZ, WEBVIEW2_ARGS)
+                changed = True
         winreg.CloseKey(key)
-    except: pass
-    return True  # Was first time — WhatsApp needs restart
+    except OSError: pass
+    # Remove the old user environment variable (also applied to every WebView2 app)
+    try:
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment", 0,
+                             winreg.KEY_READ | winreg.KEY_WRITE)
+        try:
+            if _is_legacy_wplus_args(winreg.QueryValueEx(key, "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS")[0]):
+                winreg.DeleteValue(key, "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS")
+                _broadcast_env_change()
+                changed = True
+        except OSError: pass
+        winreg.CloseKey(key)
+    except OSError: pass
+    return changed
 
 def setup():
     """Create folders, extract files, configure registry"""
@@ -88,64 +163,37 @@ def setup():
                 with open(dst, "w", encoding="utf-8") as f: f.write(content)
             except: pass
 
-    # Extract fileserver.py
-    src_fs = os.path.join(BUNDLE_DIR, "fileserver.py")
-    if os.path.exists(src_fs):
-        try:
-            with open(src_fs, "r", encoding="utf-8") as f: content = f.read()
-            # Patch DATA_DIR to point to exe directory
-            content = content.replace(
-                'os.path.dirname(os.path.dirname(os.path.abspath(__file__)))',
-                f'r"{EXE_DIR}"'
-            ).replace(
-                'os.path.dirname(os.path.abspath(__file__))',
-                f'r"{EXE_DIR}"'
-            )
-            dst_fs = os.path.join(EXE_DIR, "_fileserver.py")
-            with open(dst_fs, "w", encoding="utf-8") as f: f.write(content)
-        except: pass
+    # Older versions wrote a patched copy of the file server next to the exe
+    try: os.remove(os.path.join(EXE_DIR, "_fileserver.py"))
+    except OSError: pass
 
 setup()
 
 # ── File Server ──────────────────────────────────────────────
-# Import the extracted fileserver
-sys.path.insert(0, EXE_DIR)
+# Source mode: fileserver.py sits next to this file in service/.
+# Frozen mode: PyInstaller bundles it as a module (or via --add-data into _MEIPASS).
+FILE_SERVER_PORT = 18733
+SERVER_TOKEN = secrets.token_urlsafe(32)  # Per-session secret shared with the injected JS
+fileserver, fileserver_error = None, None
+for _dir in (os.path.dirname(os.path.abspath(__file__)), BUNDLE_DIR):
+    if _dir not in sys.path: sys.path.insert(0, _dir)
 try:
-    # Try importing the patched version
-    import importlib.util
-    spec = importlib.util.spec_from_file_location("fileserver", os.path.join(EXE_DIR, "_fileserver.py"))
-    if spec and spec.loader:
+    import fileserver
+except Exception as e:
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("fileserver", os.path.join(BUNDLE_DIR, "fileserver.py"))
         fileserver = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(fileserver)
-        start_file_server = fileserver.start_server
-    else:
-        raise ImportError("No fileserver")
-except:
-    # Fallback: inline minimal file server
-    from http.server import HTTPServer, BaseHTTPRequestHandler
-    class MinHandler(BaseHTTPRequestHandler):
-        def log_message(self, *a): pass
-        def do_OPTIONS(self):
-            self.send_response(200)
-            self.send_header("Access-Control-Allow-Origin", "*")
-            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-            self.send_header("Access-Control-Allow-Headers", "Content-Type")
-            self.end_headers()
-        def do_GET(self):
-            self.send_response(200)
-            self.send_header("Content-Type","application/json")
-            self.send_header("Access-Control-Allow-Origin","*")
-            self.end_headers()
-            self.wfile.write(b"[]")
-        def do_POST(self):
-            self.send_response(200)
-            self.send_header("Content-Type","application/json")
-            self.send_header("Access-Control-Allow-Origin","*")
-            self.end_headers()
-            self.wfile.write(b'{"ok":true}')
-    def start_file_server(port):
-        s = HTTPServer(("127.0.0.1", port), MinHandler)
-        threading.Thread(target=s.serve_forever, daemon=True).start()
+    except Exception as e2:
+        fileserver, fileserver_error = None, f"{e} / {e2}"
+
+import cdpbridge  # Page <-> file server channel (WhatsApp's CSP blocks direct requests)
+
+def start_file_server(port):
+    if fileserver is None:
+        raise RuntimeError(f"fileserver module not found ({fileserver_error})")
+    fileserver.start_server(port, data_dir=DATA_DIR, token=SERVER_TOKEN)
 
 # ── Tray Icon ────────────────────────────────────────────────
 from PIL import Image, ImageDraw, ImageFont
@@ -158,7 +206,24 @@ FILES = {
 LOG_FILE = os.path.join(DATA_DIR, "debug.log")
 STATUS_FILE = os.path.join(DATA_DIR, "status.txt")
 
-state = {"status": "Starting...", "injected": False, "syncs": 0, "running": True, "ws_url": None}
+state = {"status": "Starting...", "injected": False, "syncs": 0, "running": True, "ws_url": None, "bridge": None}
+
+def ensure_bridge(ws_url):
+    """Keep one live CDP bridge session to the WhatsApp page."""
+    b = state["bridge"]
+    if b and b.alive() and b.ws_url == ws_url:
+        return True
+    if b: b.stop()
+    b = cdpbridge.Bridge(ws_url, FILE_SERVER_PORT, SERVER_TOKEN,
+                         extra_routes={"/latest-release": latest_release_for_page}, log=log)
+    state["bridge"] = b
+    ok = b.start_and_wait() and b.alive()
+    if not ok: log("Bridge could not connect")
+    return ok
+
+def stop_bridge():
+    b, state["bridge"] = state["bridge"], None
+    if b: b.stop()
 
 def log(msg):
     state["status"] = msg
@@ -179,7 +244,7 @@ def save_file(path, data):
 
 def get_wa_target():
     try:
-        c = http.client.HTTPConnection("127.0.0.1", 9222, timeout=3)
+        c = http.client.HTTPConnection("127.0.0.1", CDP_PORT, timeout=3)
         c.request("GET", "/json")
         targets = json.loads(c.getresponse().read())
         c.close()
@@ -193,16 +258,26 @@ def cdp_eval(ws_url, code):
     p = os.path.join(DATA_DIR, "_cdp.json")
     with open(p, "w", encoding="utf-8") as f: f.write(cdp)
     try:
-        r = subprocess.run(["powershell", "-ExecutionPolicy", "Bypass", "-Command",
+        # Read frames until the whole message arrives (large results such as the
+        # deleted-messages list span many frames), skip any CDP events, and print
+        # the reply for id 1 as UTF-8 so non-ASCII message text survives.
+        r = subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
+            f'[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;'
             f'$ws=New-Object System.Net.WebSockets.ClientWebSocket;$ct=[System.Threading.CancellationToken]::None;'
             f'$ws.ConnectAsync([System.Uri]::new("{ws_url}"),$ct).Wait();'
             f'$msg=[System.IO.File]::ReadAllText("{p}");'
             f'$b=[System.Text.Encoding]::UTF8.GetBytes($msg);'
             f'$ws.SendAsync([System.ArraySegment[byte]]::new($b),[System.Net.WebSockets.WebSocketMessageType]::Text,$true,$ct).Wait();'
             f'$buf=New-Object byte[] 262144;'
-            f'$ws.ReceiveAsync([System.ArraySegment[byte]]::new($buf),$ct).Wait()|Out-Null;'
-            f'[System.Text.Encoding]::UTF8.GetString($buf).Trim([char]0);$ws.Dispose()'],
-            capture_output=True, text=True, timeout=30, creationflags=subprocess.CREATE_NO_WINDOW)
+            f'for($i=0;$i -lt 100;$i++){{'
+            f'$ms=New-Object System.IO.MemoryStream;'
+            f'do{{$res=$ws.ReceiveAsync([System.ArraySegment[byte]]::new($buf),$ct).Result;$ms.Write($buf,0,$res.Count)}}'
+            f'while(-not $res.EndOfMessage -and $res.MessageType -ne [System.Net.WebSockets.WebSocketMessageType]::Close);'
+            f'$s=[System.Text.Encoding]::UTF8.GetString($ms.ToArray());'
+            f'if($res.MessageType -eq [System.Net.WebSockets.WebSocketMessageType]::Close){{break}};'
+            f'if($s.StartsWith(\'{{"id":1,\')){{$s;break}}}};$ws.Dispose()'],
+            capture_output=True, encoding="utf-8", errors="replace", timeout=60,
+            creationflags=subprocess.CREATE_NO_WINDOW)
         os.remove(p)
         return json.loads(r.stdout.strip()).get("result", {}).get("result", {}).get("value")
     except:
@@ -252,6 +327,9 @@ def detect_wa_change():
 
 def inject(ws_url):
     cdp_eval(ws_url, 'if(window.__wplus&&window.__wplus.cleanup)window.__wplus.cleanup()')
+    # Pull anything the page saved since the last sync before overwriting it with the file copy
+    try: sync_key(ws_url, "wplus_del", FILES["wplus_del"])
+    except Exception: pass
     restored = 0
     for key, path in FILES.items():
         data = load_file(path, "null")
@@ -262,7 +340,8 @@ def inject(ws_url):
     ui_path = os.path.join(EXE_DIR, "ui.js")
     with open(engine_path, "r", encoding="utf-8") as f: engine = f.read()
     with open(ui_path, "r", encoding="utf-8") as f: ui = f.read()
-    result = cdp_eval(ws_url, engine + ";\n" + ui)
+    token = f"window.__WPLUS_TOKEN__={json.dumps(SERVER_TOKEN)};\n"
+    result = cdp_eval(ws_url, token + engine + ";\n" + ui)
     return result == "ok", restored
 
 def uninject(ws_url):
@@ -275,22 +354,36 @@ def uninject(ws_url):
         })()''')
     except: pass
 
+def sync_key(ws_url, key, path):
+    """Copy one localStorage key to disk. Returns 1 if the file changed."""
+    val = cdp_eval(ws_url, f'localStorage.getItem("{key}")')
+    if not val or val == "null":
+        return 0
+    if key == "wplus_del" and fileserver is not None:
+        # deleted_messages.json is owned by the file server: merge the browser copy
+        # into it (keeps mediaFile, moves any base64 media to disk) instead of overwriting
+        try: entries = json.loads(val)
+        except ValueError: return 0
+        return 1 if fileserver.merge_deleted(entries) else 0
+    if val != load_file(path, ""):
+        save_file(path, val)
+        return 1
+    return 0
+
 def sync(ws_url):
     changes = 0
     cdp_eval(ws_url, '(function(){var f=localStorage.getItem("wplus_sync_now");if(f)localStorage.removeItem("wplus_sync_now");})()')
     for key, path in FILES.items():
-        val = cdp_eval(ws_url, f'localStorage.getItem("{key}")')
-        if val and val != "null":
-            current = load_file(path, "")
-            if val != current:
-                save_file(path, val)
-                changes += 1
+        changes += sync_key(ws_url, key, path)
     if not hasattr(sync, '_c'): sync._c = 0
     sync._c += 1
     if sync._c % 5 == 0:
         try:
-            log_val = cdp_eval(ws_url, 'localStorage.getItem("wplus_log")')
-            if log_val and log_val != "null":
+            log_val = cdp_eval(ws_url, 'String(localStorage.getItem("wplus_log"))')  # None = CDP error
+            if log_val == "null":
+                # Debug logging is off (the engine clears wplus_log) — don't keep an old log on disk
+                if os.path.exists(LOG_FILE): os.remove(LOG_FILE)
+            elif log_val:
                 entries = json.loads(log_val)
                 if isinstance(entries, list) and entries:
                     lines = [f"WPlus Debug Log — {time.strftime('%Y-%m-%d %H:%M:%S')}", "=" * 50, ""]
@@ -302,18 +395,31 @@ def sync(ws_url):
     return changes
 
 # ── Update Checker ────────────────────────────────────────────
-def check_for_update():
-    """Check GitHub releases for a newer version. Returns (has_update, latest_tag, download_url) or (False, None, None)"""
+def fetch_latest_release():
+    """Latest GitHub release as a dict ({} on failure)."""
     try:
         ctx = ssl.create_default_context()
         conn = http.client.HTTPSConnection("api.github.com", timeout=10, context=ctx)
         conn.request("GET", f"/repos/{GITHUB_REPO}/releases/latest",
                      headers={"User-Agent": f"WPlus/{CURRENT_VERSION}"})
         resp = conn.getresponse()
-        if resp.status != 200:
-            return False, None, None
-        data = json.loads(resp.read())
+        data = json.loads(resp.read()) if resp.status == 200 else {}
         conn.close()
+        return data
+    except Exception:
+        return {}
+
+def latest_release_for_page():
+    """Answer for the panel's update check (it cannot reach api.github.com itself)."""
+    data = fetch_latest_release()
+    return {"tag_name": data.get("tag_name", ""), "html_url": data.get("html_url", "")}
+
+def check_for_update():
+    """Check GitHub releases for a newer version. Returns (has_update, latest_tag, download_url) or (False, None, None)"""
+    try:
+        data = fetch_latest_release()
+        if not data:
+            return False, None, None
 
         latest_tag = data.get("tag_name", "").lstrip("v")
         if not latest_tag:
@@ -374,6 +480,7 @@ def on_quit(icon, item):
         except: pass
         try: uninject(state["ws_url"])
         except: pass
+    stop_bridge()
     state["running"] = False
     icon.stop()
 
@@ -434,18 +541,21 @@ def create_tray():
 def service_loop():
     with open(STATUS_FILE, "w", encoding="utf-8") as f:
         f.write(f"WPlus Service started {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
-    with open(LOG_FILE, "w", encoding="utf-8") as f:
-        f.write(f"[WPlus] Session started {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
 
     try:
-        start_file_server(18733)
-        log("File server on port 18733")
+        start_file_server(FILE_SERVER_PORT)
+        log(f"File server on port {FILE_SERVER_PORT}")
     except Exception as e:
         log(f"File server: {e}")
 
     # Background update check (non-blocking)
     def bg_update_check():
         time.sleep(10)  # Wait for app to settle
+        try:
+            with open(FILES["wplus_cfg"], "r", encoding="utf-8") as f:
+                if json.load(f).get("checkUpdates") is False:
+                    return  # Turned off in the WPlus panel
+        except (OSError, ValueError, AttributeError): pass
         has_update, latest, url = check_for_update()
         if has_update:
             log(f"Update available: v{latest}")
@@ -477,6 +587,7 @@ def service_loop():
             log("No debug port — restart WhatsApp")
             return False
         state["ws_url"] = wa["webSocketDebuggerUrl"]
+        ensure_bridge(state["ws_url"])
         log("Injecting...")
         ok, restored = inject(state["ws_url"])
         if ok:
@@ -534,6 +645,7 @@ def service_loop():
                     state["ws_url"] = None
                     continue
                 state["ws_url"] = wa["webSocketDebuggerUrl"]
+                ensure_bridge(state["ws_url"])
                 alive = cdp_eval(state["ws_url"], 'window.__wplus&&window.__wplus.ready?"yes":"no"')
                 if alive != "yes":
                     log("Plugin lost (page reload?) — re-injecting...")
@@ -554,6 +666,7 @@ def service_loop():
         except: pass
         try: uninject(state["ws_url"])
         except: pass
+    stop_bridge()
     log("Service stopped")
 
 # ── Run at Startup ────────────────────────────────────────────
@@ -575,8 +688,13 @@ def set_startup(enable):
     try:
         key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, STARTUP_KEY, 0, winreg.KEY_WRITE)
         if enable:
-            exe_path = sys.executable if getattr(sys, 'frozen', False) else os.path.abspath(__file__)
-            winreg.SetValueEx(key, STARTUP_NAME, 0, winreg.REG_SZ, f'"{exe_path}"')
+            if getattr(sys, 'frozen', False):
+                cmd = f'"{sys.executable}"'
+            else:
+                # Source mode: run the script with pythonw so no console window opens
+                pyw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
+                cmd = f'"{pyw if os.path.exists(pyw) else sys.executable}" "{os.path.abspath(__file__)}"'
+            winreg.SetValueEx(key, STARTUP_NAME, 0, winreg.REG_SZ, cmd)
         else:
             try: winreg.DeleteValue(key, STARTUP_NAME)
             except: pass
@@ -587,28 +705,29 @@ def set_startup(enable):
 
 # ── Single Instance ──────────────────────────────────────────
 def kill_old_instances():
-    """Kill any existing WPlus.exe processes (except current)"""
-    my_pid = os.getpid()
+    """Stop previous WPlus instances only: WPlus.exe processes and python/pythonw
+    processes whose command line runs wplus.py (or the old wplus_service.pyw).
+    Never touches unrelated Python processes, this process or its parent
+    (the PyInstaller onefile bootloader is also named WPlus.exe)."""
+    keep = f"{os.getpid()},{os.getppid()}"
+    ps = (
+        f"$keep=@({keep}); "
+        "Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { "
+        "$keep -notcontains $_.ProcessId -and ("
+        "$_.Name -eq 'WPlus.exe' -or "
+        "(($_.Name -eq 'python.exe' -or $_.Name -eq 'pythonw.exe') -and "
+        "$_.CommandLine -match '[\\\\/]wplus(_service)?\\.pyw?\"?(\\s|$)')) } | "
+        "ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue; 'killed:' + $_.ProcessId }"
+    )
     try:
-        r = subprocess.run(["powershell", "-Command",
-            f"Get-Process -Name 'WPlus' -ErrorAction SilentlyContinue | "
-            f"Where-Object {{ $_.Id -ne {my_pid} }} | "
-            f"ForEach-Object {{ Stop-Process -Id $_.Id -Force; 'killed:' + $_.Id }}"],
-            capture_output=True, text=True, timeout=10,
+        r = subprocess.run(["powershell", "-NoProfile", "-Command", ps],
+            capture_output=True, text=True, timeout=15,
             creationflags=subprocess.CREATE_NO_WINDOW)
         killed = [l for l in r.stdout.strip().split("\n") if l.startswith("killed:")]
         if killed:
             time.sleep(1)  # Wait for old process to fully exit
             return len(killed)
-    except: pass
-    # Also kill pythonw running wplus_service
-    try:
-        subprocess.run(["powershell", "-Command",
-            f"Get-Process -Name 'pythonw' -ErrorAction SilentlyContinue | "
-            f"Where-Object {{ $_.Id -ne {my_pid} }} | Stop-Process -Force"],
-            capture_output=True, text=True, timeout=5,
-            creationflags=subprocess.CREATE_NO_WINDOW)
-    except: pass
+    except Exception: pass
     return 0
 
 # ── Entry Point ──────────────────────────────────────────────

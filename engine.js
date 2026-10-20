@@ -1,9 +1,9 @@
-// WPlus Engine v1.2 — github.com/KuchiSofts — MIT License
+// WPlus Engine — github.com/KuchiSofts — MIT License
 (function(){
   'use strict';
   // Allow re-injection by cleaning up previous instance
   if(window.__wplus&&window.__wplus.cleanup)try{window.__wplus.cleanup();}catch(e){}
-  window.__wplus={version:'1.2',ready:false};
+  window.__wplus={version:'2.0.1',ready:false};  // Keep in sync with CURRENT_VERSION in service/wplus.py
 
   var MAX_MSGS=1000,hooked=false;
   var CC=null,CON=null,GRP=null;
@@ -11,7 +11,9 @@
   var presInt=null,blurObs={};
 
   // ── Debug system ──────────────────────────────────────────
-  var debugEnabled=true;
+  // Off by default — the log contains message previews and phone numbers.
+  // Enabled from the panel (Settings → Debug logging), stored as wplus_cfg.debugEnabled.
+  var debugEnabled=false;
   var debugLog=[];
   var MAX_LOG=500;
   function dbg(category, msg, data){
@@ -32,7 +34,8 @@
 
   // ── Storage helpers ───────────────────────────────────────
   var LS={
-    get:function(k,d){try{return JSON.parse(localStorage.getItem(k));}catch(e){return d||null;}},
+    // A missing key must return the default too (JSON.parse(null) is null, not an error)
+    get:function(k,d){try{var v=JSON.parse(localStorage.getItem(k));return v===null||v===undefined?(d===undefined?null:d):v;}catch(e){return d===undefined?null:d;}},
     set:function(k,v){localStorage.setItem(k,JSON.stringify(v));},
     del:function(k){localStorage.removeItem(k);}
   };
@@ -42,6 +45,9 @@
     if(v===undefined)return k?s[k]:s;
     s[k]=v;LS.set('wplus_cfg',s);return v;
   }
+
+  debugEnabled=(LS.get('wplus_cfg',{})||{}).debugEnabled===true;
+  if(!debugEnabled){try{localStorage.removeItem('wplus_log');}catch(e){}}
 
   // Merge all old storage keys into current key on first call
   var _merged=false;
@@ -75,8 +81,21 @@
       var exists=d.some(function(m){return m.id===item.id;});
       if(!exists){d.push(item);if(d.length>MAX_MSGS)d=d.slice(-MAX_MSGS);LS.set('wplus_del',d);}
     }
-    if(action==='clear'){LS.del('wplus_del');}
+    if(action==='clear'){
+      LS.del('wplus_del');
+      ['wplus_deleted_msgs','wtplus_deleted_msgs','wtplus_del'].forEach(function(k){LS.del(k);});
+      serverPost('/deleted/clear',{});
+    }
     return d;
+  }
+
+  // Server saved the media to disk — keep only the file reference in localStorage
+  function noteMediaFile(id,r){
+    if(!r||!r.mediaFile)return;
+    var d=deletedMsgs('get');
+    for(var i=d.length-1;i>=0;i--){
+      if(d[i].id===id){d[i].mediaFile=r.mediaFile;delete d[i].media;LS.set('wplus_del',d);break;}
+    }
   }
 
   function viewOnce(action,item){
@@ -89,19 +108,61 @@
 
   // ── File Server API (localhost:18733) ────────────────────
   var SERVER='http://127.0.0.1:18733';
-  function serverPost(path,data){
+  // Per-session token set by the WPlus service at injection time — the server rejects requests without it
+  var TOKEN=window.__WPLUS_TOKEN__||'';
+  try{delete window.__WPLUS_TOKEN__;}catch(e){}
+  // WhatsApp's Content-Security-Policy blocks fetch/img/media requests to 127.0.0.1,
+  // so requests go through a DevTools binding instead: the WPlus service receives
+  // window.__wplusBridge(json), forwards it to the file server and answers through
+  // window.__wplusBridgeReply(id,result). Plain fetch is only a fallback.
+  var _br={n:0,cb:{}};
+  window.__wplusBridgeReply=function(id,res){var c=_br.cb[id];delete _br.cb[id];if(c)c(res);};
+  function hasBridge(){return typeof window.__wplusBridge==='function';}
+  function bridge(method,path,body,cb){
+    var id=++_br.n;_br.cb[id]=cb;
+    try{window.__wplusBridge(JSON.stringify({id:id,method:method,path:path,body:body===undefined?null:body}));}
+    catch(e){delete _br.cb[id];cb(null);}
+  }
+  function serverPost(path,data,cb){
+    if(hasBridge()){
+      bridge('POST',path,data,function(r){
+        var j=r&&r.json;dbg('server',path+' → '+(r?r.status:'no reply'));if(cb&&j)cb(j);
+      });
+      return;
+    }
     try{
-      fetch(SERVER+path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)})
+      fetch(SERVER+path,{method:'POST',headers:{'Content-Type':'application/json','X-WPlus-Token':TOKEN},body:JSON.stringify(data)})
       .then(function(r){return r.json();})
-      .then(function(r){dbg('server',path+' → '+JSON.stringify(r));})
+      .then(function(r){dbg('server',path+' → '+JSON.stringify(r));if(cb)cb(r);})
       .catch(function(e){dbg('server',path+' error: '+e.message);});
     }catch(e){dbg('server','fetch error: '+e.message);}
   }
   function serverGet(path,cb){
+    if(hasBridge()){bridge('GET',path,null,function(r){if(cb)cb(r&&r.json||null);});return;}
     try{
-      fetch(SERVER+path).then(function(r){return r.json();}).then(cb)
+      fetch(SERVER+path,{headers:{'X-WPlus-Token':TOKEN}}).then(function(r){return r.json();}).then(cb)
       .catch(function(e){dbg('server','GET '+path+' error');if(cb)cb(null);});
     }catch(e){if(cb)cb(null);}
+  }
+  function mediaPath(rel){return '/media/'+String(rel).split('/').map(encodeURIComponent).join('/');}
+  // URL for a saved media file (data-relative path like "Images/x.jpg") — fallback only
+  function mediaUrl(rel){
+    return SERVER+mediaPath(rel)+'?t='+encodeURIComponent(TOKEN);
+  }
+  // Load a saved media file as a blob: URL (allowed by WhatsApp's CSP); cb(url|null)
+  var _blobs={};
+  function loadMedia(rel,cb){
+    if(_blobs[rel]){cb(_blobs[rel]);return;}
+    if(!hasBridge()){cb(mediaUrl(rel));return;}
+    bridge('GET',mediaPath(rel),null,function(r){
+      if(!r||r.status!==200||!r.b64){cb(null);return;}
+      try{
+        var bin=atob(r.b64),u8=new Uint8Array(bin.length);
+        for(var i=0;i<bin.length;i++)u8[i]=bin.charCodeAt(i);
+        _blobs[rel]=URL.createObjectURL(new Blob([u8],{type:r.mime||'application/octet-stream'}));
+        cb(_blobs[rel]);
+      }catch(e){cb(null);}
+    });
   }
 
   // ── Module finder ─────────────────────────────────────────
@@ -251,7 +312,7 @@
         text:msg.__x_backupText,caption:msg.__x_backupCaption,sender:sender,
         time:msg.__x_backupTime||Date.now(),chat:chatName,media:null};
 
-      serverPost('/msg/deleted',entry);
+      serverPost('/msg/deleted',entry,function(r){noteMediaFile(entry.id,r);});
       dbg('msg:del','Sent to file server for permanent storage');
 
       // Try to capture media blob for images/videos/audio
@@ -269,7 +330,7 @@
               var d=deletedMsgs('get');
               for(var i=d.length-1;i>=0;i--){if(d[i].id===entry.id){d[i].media=entry.media;d[i].mime=entry.mime;break;}}
               LS.set('wplus_del',d);
-              serverPost('/msg/deleted',entry);
+              serverPost('/msg/deleted',entry,function(r){noteMediaFile(entry.id,r);});
               dbg('msg:del','Media sent to file server');
             };
             reader.readAsDataURL(blob);
@@ -307,7 +368,7 @@
             var blob=md.mediaBlob._blob;
             var r=new FileReader();
             r.onload=function(){entry.data=r.result;entry.mime=blob.type;entry.size=blob.size;saveEntry();
-              console.log('[WPlus] View-once captured:',type,sender);};
+              dbg('msg:new','View-once captured: '+type);};
             r.readAsDataURL(blob);return true;
           }
           // Try force-downloading via WhatsApp's internal API
@@ -337,13 +398,20 @@
     if(id==='disableReceipts'){var s=findExport("sendConversationSeen");if(s&&_seen){if(on){s.sendConversationSeen=function(){return Promise.resolve();};dbg('toggle','Read receipts disabled');}else{s.sendConversationSeen=_seen;dbg('toggle','Read receipts restored');}}else dbg('toggle','sendConversationSeen not available');}
     if(id==='playAudioPrivate'){var pl=findExport("markPlayed");if(pl&&_played){if(on){pl.markPlayed=function(){};dbg('toggle','Audio play status hidden');}else{pl.markPlayed=_played;dbg('toggle','Audio play status restored');}}else dbg('toggle','markPlayed not available');}
     // Blur: inject/remove <style> tags — CSS auto-applies to all elements including new ones
+    var sidebarPreview='#pane-side [data-testid="cell-frame-secondary"] > :first-child';
+    // Message bubbles: current WhatsApp marks them with data-testid="msg-container"
+    // (the old .message-in/.message-out classes are gone); text spans can be nested.
+    var bubble='#main [data-testid="msg-container"]';
+    var bubbleText=bubble+' [data-testid~="selectable-text"]';
     var blurCSS={
       blurMessages:[
         // Message text in bubbles (chat area only)
+        bubbleText,
         '.message-in .copyable-text','.message-out .copyable-text',
         // Chat list message preview text
-        '._ak8k',
+        '._ak8k',sidebarPreview,
         // Media in messages (blob images >80px = photos, NOT emojis/reactions)
+        bubble+' img[src^="blob:"]',bubble+' img[src^="data:image/jpeg"]',bubble+' video',
         '.message-in img[src^="blob:"]','.message-out img[src^="blob:"]',
         '.message-in img[src^="data:image/jpeg"]','.message-out img[src^="data:image/jpeg"]',
         '.message-in video','.message-out video'
@@ -352,6 +420,7 @@
         // Contact names in chat list
         'span[title][dir]',
         // Sender names in group messages (colored)
+        bubble+' [data-testid="author"]',
         'span._ahxt',
         // Chat header name
         'header span[dir="auto"]','header span.x1iyjqo2',
@@ -367,9 +436,14 @@
         'img[src^="data:image/png"]'
       ],
       blurAvatar:[
-        // ONLY WhatsApp CDN profile pictures (avatars)
+        // CDN avatars and sidebar avatars, including blob/data URLs
         'img[src*=".whatsapp.net/v/t61"]',
-        'img[src*="pps.whatsapp.net"]'
+        'img[src*="pps.whatsapp.net"]',
+        '#pane-side [data-testid="cell-frame-container"] > :first-child img',
+        // Avatars with a status ring or a badge (disappearing messages, group, etc.)
+        // are drawn as a masked SVG <image>, not an <img> — blur the whole SVG
+        'svg:has(image[*|href*=".whatsapp.net/"])',
+        '#pane-side [data-testid="cell-frame-container"] > :first-child svg:has(image)'
       ]
     };
     // Build CSS — add blur + hover-reveal, exclude tiny images (<25px = emojis/reactions/icons)
@@ -383,6 +457,11 @@
       var hov=sels.map(function(s){return s+extraFilter+':hover';}).join(',');
       _builtCSS[id]=sel+'{filter:blur('+blurPx+'px)!important;transition:filter .15s!important}'+hov+'{filter:none!important}';
     });
+    // Avoid stacked filters so hovering the preview reveals all of its text.
+    _builtCSS.blurMessages+=sidebarPreview+' *{filter:none!important}';
+    // Same for nested text spans in a bubble, and reveal the whole bubble on hover.
+    _builtCSS.blurMessages+=bubbleText+' [data-testid~="selectable-text"]{filter:none!important}'+
+      bubble+':hover [data-testid~="selectable-text"],'+bubble+':hover img,'+bubble+':hover video{filter:none!important}';
     if(_builtCSS[id]){
       var styleId='wplus-css-'+id;
       var existing=document.getElementById(styleId);
@@ -753,6 +832,9 @@
   window.__wplus.applyToggle=applyToggle;
   window.__wplus.goToMessage=goToMessage;
   window.__wplus.showMedia=showMedia;
+  window.__wplus.mediaUrl=mediaUrl;
+  window.__wplus.loadMedia=loadMedia;
+  window.__wplus.serverGet=serverGet;
   window.__wplus.forceRestoreCurrentChat=forceRestoreCurrentChat;
   window.__wplus.exportContacts=function(){
     if(!CON){alert('Loading...');return;}var cs=[];
@@ -906,7 +988,7 @@
     getLogText:function(){return debugLog.map(function(e){return e.ts+' ['+e.cat+'] '+e.msg+(e.data?' | '+e.data:'');}).join('\n');},
     clear:function(){debugLog=[];dbg('debug','Log cleared');},
     enable:function(){debugEnabled=true;dbg('debug','Debug enabled');},
-    disable:function(){debugEnabled=false;},
+    disable:function(){debugEnabled=false;debugLog=[];try{localStorage.removeItem('wplus_log');}catch(e){}},
     isEnabled:function(){return debugEnabled;},
     status:function(){
       return{
@@ -947,6 +1029,8 @@
     document.querySelectorAll('.wplus-blur-t,.wplus-blur-p').forEach(function(e){e.classList.remove('wplus-blur-t','wplus-blur-p');});
     // Clear debug timer
     if(dbg._timer){clearTimeout(dbg._timer);dbg._timer=null;}
+    // Release cached media blobs
+    Object.keys(_blobs).forEach(function(k){try{URL.revokeObjectURL(_blobs[k]);}catch(e){}});_blobs={};
 
     // Remove event listeners by clearing the wplus object
     window.__wplus={version:'removed',ready:false,cleanup:function(){}};
@@ -955,5 +1039,5 @@
   };
 
   setTimeout(boot,3000);
-  dbg('boot','Engine v1.2 loaded');
+  dbg('boot','Engine v'+window.__wplus.version+' loaded');
 })();

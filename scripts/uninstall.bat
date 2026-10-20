@@ -1,8 +1,10 @@
 @echo off
 title WPlus Uninstaller
 echo.
-echo   Removing WPlus...
-powershell -Command "Remove-ItemProperty -Path 'HKCU:\Software\Policies\Microsoft\Edge\WebView2\AdditionalBrowserArguments' -Name '*' -Force -ErrorAction SilentlyContinue; [System.Environment]::SetEnvironmentVariable('WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS','','User')"
+echo   Removing WPlus registry settings...
+echo   (Windows asks for administrator permission to remove the machine-wide policy.)
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0webview2-policy.ps1" -Remove
 echo   Done. Restart WhatsApp Desktop to complete removal.
+echo   Your saved messages stay in the data folder - delete it manually if you no longer need them.
 echo.
 pause

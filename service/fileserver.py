@@ -1,290 +1,469 @@
 #!/usr/bin/env python3
-# WPlus File Server — serves saved media and accepts file uploads from injected JS
-# Runs on localhost:18733
+# WPlus File Server — stores backed-up messages/media and serves media to the injected JS
+#
+# Security model:
+#   - Listens on 127.0.0.1 only and rejects requests whose Host header is not local
+#     (protects against DNS rebinding).
+#   - Browser requests must come from a WhatsApp origin (https://*.whatsapp.com).
+#     Any other Origin is rejected, including no-preflight "text/plain" POSTs.
+#   - Every request (except CORS preflight) must carry the per-session token that
+#     wplus.py injects together with engine.js (X-WPlus-Token header or ?t= query).
+#   - File access is confined to the media folders inside the data directory.
 
-import json, os, base64, time, threading
+import json, os, re, base64, time, threading, hashlib, hmac, secrets, mimetypes
 from http.server import HTTPServer, BaseHTTPRequestHandler
+from urllib.parse import urlsplit, unquote, parse_qs
 
-DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
-MEDIA_DIRS = {
-    "image": os.path.join(DATA_DIR, "Images"),
-    "sticker": os.path.join(DATA_DIR, "Images"),
-    "video": os.path.join(DATA_DIR, "Videos"),
-    "ptt": os.path.join(DATA_DIR, "Sounds"),
-    "audio": os.path.join(DATA_DIR, "Sounds"),
-    "document": os.path.join(DATA_DIR, "Docs"),
-}
-for d in set(MEDIA_DIRS.values()):
-    os.makedirs(d, exist_ok=True)
+PORT = 18733
+MAX_BODY = 256 * 1024 * 1024          # 256 MB — large enough for base64-encoded videos
+RETENTION_MS = 60 * 60 * 60 * 1000    # 60h — WhatsApp "delete for everyone" window is ~2.5 days
+TOKEN = None                          # Set by start_server()
 
-NEW_MSGS = os.path.join(DATA_DIR, "new_messages.json")
-DEL_MSGS = os.path.join(DATA_DIR, "deleted_messages.json")
-SETTINGS = os.path.join(DATA_DIR, "settings.json")
+_lock = threading.RLock()             # Guards all reads/writes of the JSON files
+
+DATA_DIR = MEDIA_DIRS = NEW_MSGS = DEL_MSGS = None
+
+def configure(data_dir, create=True):
+    """Point the server at a data directory and (optionally) create the media folders."""
+    global DATA_DIR, MEDIA_DIRS, NEW_MSGS, DEL_MSGS
+    DATA_DIR = os.path.realpath(data_dir)
+    MEDIA_DIRS = {
+        "image": os.path.join(DATA_DIR, "Images"),
+        "sticker": os.path.join(DATA_DIR, "Images"),
+        "video": os.path.join(DATA_DIR, "Videos"),
+        "ptt": os.path.join(DATA_DIR, "Sounds"),
+        "audio": os.path.join(DATA_DIR, "Sounds"),
+        "document": os.path.join(DATA_DIR, "Docs"),
+    }
+    if create:
+        for d in set(MEDIA_DIRS.values()):
+            os.makedirs(d, exist_ok=True)
+    NEW_MSGS = os.path.join(DATA_DIR, "new_messages.json")
+    DEL_MSGS = os.path.join(DATA_DIR, "deleted_messages.json")
+
+# Default: <project root>/data when run from source
+configure(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data"), create=False)
 
 def load_json(path, default=None):
     try:
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
-    except:
+    except (OSError, ValueError):
         return default if default is not None else []
 
 def save_json(path, data):
-    with open(path, "w", encoding="utf-8") as f:
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False)
+    os.replace(tmp, path)
+
+# ── Path safety ───────────────────────────────────────────────
+def _media_roots():
+    return sorted(set(os.path.realpath(d) for d in MEDIA_DIRS.values()))
+
+def safe_media_path(rel):
+    """Resolve a data-relative media path (e.g. 'Images/x.jpg').
+    Returns the absolute path only if it lies inside one of the media folders."""
+    if not rel or not isinstance(rel, str) or "\0" in rel:
+        return None
+    rel = rel.replace("\\", "/")
+    if rel.startswith("/") or re.match(r"^[A-Za-z]:", rel):
+        return None
+    full = os.path.realpath(os.path.join(DATA_DIR, *rel.split("/")))
+    for root in _media_roots():
+        try:
+            if full != root and os.path.commonpath([full, root]) == root:
+                return full
+        except ValueError:  # different drives
+            continue
+    return None
+
+def _remove_media(rel):
+    path = safe_media_path(rel)
+    if path and os.path.isfile(path):
+        try:
+            os.remove(path)
+            return True
+        except OSError:
+            pass
+    return False
+
+# ── Media extraction ──────────────────────────────────────────
+TYPE_EXT = {"image": "jpg", "video": "mp4", "ptt": "ogg", "audio": "mp3", "sticker": "webp", "document": "bin"}
+MIME_EXT = {
+    "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp", "image/gif": "gif",
+    "video/mp4": "mp4", "video/webm": "webm", "video/3gpp": "3gp", "video/quicktime": "mov",
+    "audio/ogg": "ogg", "audio/mpeg": "mp3", "audio/mp4": "m4a", "audio/aac": "aac",
+    "audio/amr": "amr", "audio/wav": "wav", "audio/webm": "weba",
+    "application/pdf": "pdf", "application/zip": "zip", "text/plain": "txt",
+}
+SERVE_MIME = {
+    "jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png", "webp": "image/webp", "gif": "image/gif",
+    "mp4": "video/mp4", "webm": "video/webm", "3gp": "video/3gpp", "mov": "video/quicktime",
+    "ogg": "audio/ogg", "mp3": "audio/mpeg", "m4a": "audio/mp4", "aac": "audio/aac",
+    "amr": "audio/amr", "wav": "audio/wav", "weba": "audio/webm", "pdf": "application/pdf",
+}
+B64_PREFIXES = ("/9j/", "AAAA", "UklG", "iVBOR", "JVBER", "T2dn", "GkXE", "data:")
+B64_CHARS = set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=\n\r")
+
+def _ext_for(mime, msg_type):
+    mime = (mime or "").split(";")[0].strip().lower()
+    ext = MIME_EXT.get(mime)
+    if not ext and mime:
+        guess = mimetypes.guess_extension(mime) or ""
+        ext = guess.lstrip(".")
+    if not ext or not re.fullmatch(r"[a-z0-9]{1,5}", ext):
+        ext = TYPE_EXT.get(msg_type, "bin")
+    return ext
+
+def _safe_sender(sender):
+    s = str(sender or "unknown").split("@")[0]
+    s = re.sub(r"[^0-9A-Za-z_-]", "", s)[:32]
+    return s or "unknown"
+
+def _save_media(data):
+    """Extract base64 media and save to file. Returns data-relative path or None."""
+    media_b64 = data.get("media") or None
+    body_b64 = data.get("body") or ""
+    msg_type = data.get("type", "")
+    if not isinstance(media_b64, str):
+        media_b64 = None
+    if not isinstance(body_b64, str):
+        body_b64 = ""
+
+    # Body might be base64 media (WhatsApp stores thumbnails there)
+    if not media_b64 and len(body_b64) > 100 and msg_type in TYPE_EXT:
+        if body_b64.startswith(B64_PREFIXES) or (len(body_b64) > 500 and all(c in B64_CHARS for c in body_b64[:200])):
+            media_b64 = body_b64
+
+    if not media_b64:
+        return None
+
+    mime = data.get("mime") if isinstance(data.get("mime"), str) else ""
+    raw_b64 = media_b64
+    if raw_b64.startswith("data:"):
+        head, _, raw_b64 = raw_b64.partition(",")
+        mime = head[5:].split(";")[0] or mime
+
+    try:
+        raw_bytes = base64.b64decode(raw_b64)
+    except (ValueError, TypeError):
+        return None
+    if not raw_bytes:
+        return None
+
+    ext = _ext_for(mime, msg_type)
+    sender = _safe_sender(data.get("sender"))
+    ts = time.strftime("%Y%m%d_%H%M%S")
+    tag = hashlib.sha1(str(data.get("id") or secrets.token_hex(8)).encode("utf-8")).hexdigest()[:10]
+    folder = MEDIA_DIRS.get(msg_type, MEDIA_DIRS["document"])
+
+    filename = f"WPlus_{sender}_{ts}_{tag}.{ext}"
+    n = 1
+    while os.path.exists(os.path.join(folder, filename)):
+        n += 1
+        filename = f"WPlus_{sender}_{ts}_{tag}_{n}.{ext}"
+
+    filepath = os.path.join(folder, filename)
+    with open(filepath, "wb") as f:
+        f.write(raw_bytes)
+    return os.path.relpath(filepath, DATA_DIR).replace(os.sep, "/")
+
+def _store_media(entry):
+    """Move base64 media out of a message entry into a file. Never keeps base64 in JSON."""
+    if not entry.get("mediaFile"):
+        path = _save_media(entry)
+        if path:
+            entry["mediaFile"] = path
+    entry.pop("media", None)
+    body = entry.get("body")
+    if entry.get("mediaFile") and isinstance(body, str) and len(body) > 200:
+        entry["body"] = ""
+    return entry
+
+def _expire_new(msgs):
+    """Drop backed-up messages older than RETENTION_MS and delete their media files."""
+    cutoff = time.time() * 1000 - RETENTION_MS
+    expired = [m for m in msgs if (m.get("time") or 0) < cutoff]
+    remaining = [m for m in msgs if (m.get("time") or 0) >= cutoff]
+    keep = {m.get("mediaFile") for m in load_json(DEL_MSGS, []) if isinstance(m, dict)}
+    files = 0
+    for exp in expired:
+        mf = exp.get("mediaFile")
+        if mf and mf not in keep and _remove_media(mf):
+            files += 1
+    return remaining, len(expired), files
+
+# ── Public helpers (used by wplus.py) ─────────────────────────
+def merge_deleted(entries):
+    """Merge the browser's copy of deleted messages into deleted_messages.json.
+    The file is the source of truth: existing entries keep their mediaFile, and
+    base64 media is written to disk instead of being stored in JSON.
+    Returns the number of entries added or updated."""
+    if not isinstance(entries, list):
+        return 0
+    with _lock:
+        del_msgs = load_json(DEL_MSGS, [])
+        by_id = {m.get("id"): m for m in del_msgs if isinstance(m, dict) and m.get("id")}
+        changed = 0
+        for e in entries:
+            if not isinstance(e, dict) or not e.get("id"):
+                continue
+            cur = by_id.get(e["id"])
+            if cur is None:
+                cur = {k: v for k, v in e.items() if not str(k).startswith("__")}
+                _store_media(cur)
+                del_msgs.append(cur)
+                by_id[cur["id"]] = cur
+                changed += 1
+                continue
+            updated = False
+            if not cur.get("mediaFile") and e.get("media"):
+                tmp = dict(cur, media=e.get("media"), mime=e.get("mime") or cur.get("mime"))
+                path = _save_media(tmp)
+                if path:
+                    cur["mediaFile"] = path
+                    updated = True
+            for k, v in e.items():
+                if k in ("media", "body") or str(k).startswith("__"):
+                    continue
+                if v and not cur.get(k):
+                    cur[k] = v
+                    updated = True
+            if updated:
+                _store_media(cur)
+                changed += 1
+        if changed:
+            save_json(DEL_MSGS, del_msgs)
+        return changed
+
+def load_deleted():
+    with _lock:
+        return load_json(DEL_MSGS, [])
+
+# ── Request checks ────────────────────────────────────────────
+def is_allowed_origin(origin):
+    try:
+        u = urlsplit(origin)
+    except ValueError:
+        return False
+    host = (u.hostname or "").lower()
+    return u.scheme == "https" and (host == "whatsapp.com" or host.endswith(".whatsapp.com"))
 
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args): pass  # Silent
 
+    def _host_ok(self):
+        port = self.server.server_address[1]
+        host = (self.headers.get("Host") or "").lower()
+        return host in (f"127.0.0.1:{port}", f"localhost:{port}")
+
+    def _origin_ok(self):
+        origin = self.headers.get("Origin")
+        return origin is None or is_allowed_origin(origin)
+
+    def _token_ok(self):
+        if not TOKEN:
+            return False
+        token = self.headers.get("X-WPlus-Token")
+        if not token:
+            token = (parse_qs(urlsplit(self.path).query).get("t") or [""])[0]
+        return hmac.compare_digest(str(token), TOKEN)
+
     def _cors(self):
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        origin = self.headers.get("Origin")
+        if origin and is_allowed_origin(origin):
+            self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Vary", "Origin")
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type, X-WPlus-Token")
+            if self.headers.get("Access-Control-Request-Private-Network"):
+                self.send_header("Access-Control-Allow-Private-Network", "true")
+
+    def _deny(self, code=403):
+        self.send_response(code)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def _guard(self):
+        """Common checks for GET/POST. Returns True if the request may proceed."""
+        if not self._host_ok() or not self._origin_ok() or not self._token_ok():
+            self._deny(403)
+            return False
+        return True
 
     def do_OPTIONS(self):
-        self.send_response(200)
+        origin = self.headers.get("Origin")
+        if not self._host_ok() or not origin or not is_allowed_origin(origin):
+            self._deny(403)
+            return
+        self.send_response(204)
         self._cors()
+        self.send_header("Content-Length", "0")
         self.end_headers()
 
     def do_GET(self):
+        if not self._guard():
+            return
+        path = urlsplit(self.path).path
         # Serve media files: /media/Images/filename.jpg
-        if self.path.startswith("/media/"):
-            filepath = os.path.join(DATA_DIR, self.path[7:].replace("/", os.sep))
-            if os.path.exists(filepath):
-                self.send_response(200)
-                self._cors()
+        if path.startswith("/media/"):
+            filepath = safe_media_path(unquote(path[7:]))
+            if filepath and os.path.isfile(filepath):
                 ext = filepath.rsplit(".", 1)[-1].lower()
-                mime = {"jpg":"image/jpeg","jpeg":"image/jpeg","png":"image/png","webp":"image/webp",
-                        "mp4":"video/mp4","ogg":"audio/ogg","mp3":"audio/mpeg","pdf":"application/pdf"}.get(ext, "application/octet-stream")
-                self.send_header("Content-Type", mime)
-                self.end_headers()
-                with open(filepath, "rb") as f:
-                    self.wfile.write(f.read())
+                try:
+                    size = os.path.getsize(filepath)
+                    with open(filepath, "rb") as f:
+                        self.send_response(200)
+                        self._cors()
+                        self.send_header("Content-Type", SERVE_MIME.get(ext, "application/octet-stream"))
+                        self.send_header("Content-Length", str(size))
+                        self.send_header("X-Content-Type-Options", "nosniff")
+                        self.end_headers()
+                        while True:
+                            chunk = f.read(1024 * 1024)
+                            if not chunk:
+                                break
+                            self.wfile.write(chunk)
+                except (OSError, ConnectionError):
+                    pass
                 return
-
-        # Get deleted messages
-        if self.path == "/deleted":
-            self.send_response(200)
-            self._cors()
-            self.send_header("Content-Type", "application/json")
-            self.end_headers()
-            data = load_json(DEL_MSGS, [])
-            self.wfile.write(json.dumps(data).encode())
-            return
-
-        # Get settings
-        if self.path == "/settings":
-            self.send_response(200)
-            self._cors()
-            self.send_header("Content-Type", "application/json")
-            self.end_headers()
-            data = load_json(SETTINGS, {})
-            self.wfile.write(json.dumps(data).encode())
-            return
-
-        self.send_response(404)
-        self.end_headers()
+        self._deny(404)
 
     def do_POST(self):
-        length = int(self.headers.get("Content-Length", 0))
-        body = self.rfile.read(length)
-
+        if not self._guard():
+            return
         try:
-            data = json.loads(body)
-        except:
-            self.send_response(400)
-            self.end_headers()
+            length = int(self.headers.get("Content-Length", 0))
+        except ValueError:
+            length = -1
+        if length < 0 or length > MAX_BODY:
+            self._deny(413)
+            return
+        body = self.rfile.read(length)
+        try:
+            data = json.loads(body or b"{}")
+        except ValueError:
+            data = None
+        if not isinstance(data, dict):
+            self._deny(400)
             return
 
+        path = urlsplit(self.path).path
+
         # Save a new message (backup)
-        if self.path == "/msg/new":
-            msgs = load_json(NEW_MSGS, [])
-            # Deduplicate
-            if not any(m.get("id") == data.get("id") for m in msgs):
-                # Save media to file if present
-                media_path = self._save_media(data)
-                if media_path:
-                    data["mediaFile"] = media_path
-                    data.pop("media", None)  # Remove base64 from JSON
-                    data.pop("body", None) if data.get("mediaFile") else None
-                msgs.append(data)
-                # Clean messages older than 48h (WhatsApp "delete for everyone" window)
-                cutoff = time.time() * 1000 - 172800000  # 48 hours in ms
-                expired = [m for m in msgs if m.get("time", 0) < cutoff]
-                msgs = [m for m in msgs if m.get("time", 0) >= cutoff]
-                # Delete media files for expired messages
-                for exp in expired:
-                    mf = exp.get("mediaFile")
-                    if mf:
-                        try: os.remove(os.path.join(DATA_DIR, mf))
-                        except: pass
-                save_json(NEW_MSGS, msgs)
+        if path == "/msg/new":
+            if not data.get("id"):
+                self._deny(400)
+                return
+            with _lock:
+                msgs = load_json(NEW_MSGS, [])
+                if not any(m.get("id") == data.get("id") for m in msgs):
+                    entry = {k: v for k, v in data.items() if not str(k).startswith("__")}
+                    _store_media(entry)
+                    if entry.get("mediaFile"):
+                        entry.pop("body", None)  # base64 thumbnail — the file is enough
+                    msgs.append(entry)
+                    msgs, _, _ = _expire_new(msgs)
+                    save_json(NEW_MSGS, msgs)
             self._ok({"saved": True})
             return
 
         # Message deleted — move from new to deleted
-        if self.path == "/msg/deleted":
+        if path == "/msg/deleted":
             msg_id = data.get("id")
-            # Find in new messages
-            new_msgs = load_json(NEW_MSGS, [])
-            found = None
-            remaining = []
-            for m in new_msgs:
-                if m.get("id") == msg_id:
-                    found = m
-                else:
-                    remaining.append(m)
+            if not msg_id:
+                self._deny(400)
+                return
+            with _lock:
+                new_msgs = load_json(NEW_MSGS, [])
+                found = None
+                remaining = []
+                for m in new_msgs:
+                    if found is None and m.get("id") == msg_id:
+                        found = m
+                    else:
+                        remaining.append(m)
 
-            # Merge with incoming data (has the backed-up content)
-            if found:
+                del_msgs = load_json(DEL_MSGS, [])
+                existing = next((m for m in del_msgs if isinstance(m, dict) and m.get("id") == msg_id), None)
+                entry = existing if existing is not None else (found or {})
+                if existing is not None and found:
+                    for k, v in found.items():
+                        if v and not entry.get(k):
+                            entry[k] = v
+
+                # Merge with incoming data (has the backed-up content)
                 for k, v in data.items():
-                    if v and k not in found:
-                        found[k] = v
-                entry = found
-            else:
-                entry = data
+                    if str(k).startswith("__"):
+                        continue
+                    if v and not entry.get(k):
+                        entry[k] = v
 
-            # Save media if not already saved
-            if not entry.get("mediaFile"):
-                media_path = self._save_media(entry)
-                if media_path:
-                    entry["mediaFile"] = media_path
-                    entry.pop("media", None)
-
-            # Remove raw base64 body for media messages
-            if entry.get("mediaFile") and entry.get("body") and len(entry.get("body","")) > 200:
-                entry["body"] = ""
-
-            # Add to deleted messages
-            del_msgs = load_json(DEL_MSGS, [])
-            if not any(m.get("id") == msg_id for m in del_msgs):
-                del_msgs.append(entry)
+                _store_media(entry)
+                if existing is None:
+                    del_msgs.append(entry)
                 save_json(DEL_MSGS, del_msgs)
+                if found is not None:
+                    save_json(NEW_MSGS, remaining)
 
-            # Remove from new messages
-            save_json(NEW_MSGS, remaining)
-
-            self._ok({"deleted": True, "hasMedia": bool(entry.get("mediaFile"))})
+            self._ok({"deleted": True, "hasMedia": bool(entry.get("mediaFile")),
+                      "mediaFile": entry.get("mediaFile") or ""})
             return
 
-        # Save settings
-        if self.path == "/settings":
-            save_json(SETTINGS, data)
-            self._ok({"saved": True})
+        # Clear all saved deleted messages (UI "Clear all")
+        if path == "/deleted/clear":
+            with _lock:
+                count = len(load_json(DEL_MSGS, []))
+                save_json(DEL_MSGS, [])
+            self._ok({"cleared": count})
             return
 
         # Migrate — re-process old deleted messages, save their media to files
-        if self.path == "/migrate":
-            del_msgs = load_json(DEL_MSGS, [])
-            migrated = 0
-            for msg in del_msgs:
-                if msg.get("mediaFile"):
-                    continue  # Already has a file
-                media_path = self._save_media(msg)
-                if media_path:
-                    msg["mediaFile"] = media_path
-                    # Clear the base64 body to save space
-                    if msg.get("body") and len(msg.get("body","")) > 200:
-                        msg["body"] = ""
-                    if msg.get("media"):
-                        msg["media"] = ""
-                    migrated += 1
-            if migrated > 0:
-                save_json(DEL_MSGS, del_msgs)
+        if path == "/migrate":
+            with _lock:
+                del_msgs = load_json(DEL_MSGS, [])
+                migrated = 0
+                dirty = False
+                for msg in del_msgs:
+                    if not isinstance(msg, dict):
+                        continue
+                    before = (msg.get("mediaFile"), "media" in msg, msg.get("body"))
+                    _store_media(msg)
+                    if msg.get("mediaFile") and not before[0]:
+                        migrated += 1
+                    if before != (msg.get("mediaFile"), "media" in msg, msg.get("body")):
+                        dirty = True
+                if dirty:
+                    save_json(DEL_MSGS, del_msgs)
             self._ok({"migrated": migrated, "total": len(del_msgs)})
             return
 
         # Cleanup — remove expired new messages + their media
-        if self.path == "/cleanup":
-            cutoff = time.time() * 1000 - 172800000  # 48h
-            msgs = load_json(NEW_MSGS, [])
-            expired = [m for m in msgs if m.get("time", 0) < cutoff]
-            remaining = [m for m in msgs if m.get("time", 0) >= cutoff]
-            cleaned_files = 0
-            for exp in expired:
-                mf = exp.get("mediaFile")
-                if mf:
-                    try:
-                        os.remove(os.path.join(DATA_DIR, mf))
-                        cleaned_files += 1
-                    except: pass
-            save_json(NEW_MSGS, remaining)
-            self._ok({"removed": len(expired), "files": cleaned_files, "remaining": len(remaining)})
+        if path == "/cleanup":
+            with _lock:
+                msgs = load_json(NEW_MSGS, [])
+                remaining, removed, files = _expire_new(msgs)
+                save_json(NEW_MSGS, remaining)
+            self._ok({"removed": removed, "files": files, "remaining": len(remaining)})
             return
 
-        self.send_response(404)
-        self.end_headers()
-
-    def _save_media(self, data):
-        """Extract base64 media and save to file. Returns relative path or None."""
-        media_b64 = data.get("media") or None
-        body_b64 = data.get("body") or ""
-        msg_type = data.get("type", "")
-
-        # Check multiple sources for base64 data
-        if not media_b64:
-            # Body might be base64 media
-            if len(body_b64) > 100 and msg_type in ("image","video","ptt","audio","sticker","document"):
-                # Check common base64 prefixes
-                if (body_b64.startswith("/9j/") or  # JPEG
-                    body_b64.startswith("AAAA") or  # Various
-                    body_b64.startswith("UklG") or  # RIFF/WebP
-                    body_b64.startswith("iVBOR") or # PNG
-                    body_b64.startswith("JVBER") or # PDF
-                    body_b64.startswith("T2dn") or  # OGG
-                    body_b64.startswith("GkXE") or  # WebM
-                    body_b64.startswith("data:") or # Data URL
-                    (len(body_b64) > 500 and all(c in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=\n\r" for c in body_b64[:200]))):
-                    media_b64 = body_b64
-
-        if not media_b64:
-            return None
-
-        # Determine type and extension
-        msg_type = data.get("type", "image")
-        ext_map = {"image": "jpg", "video": "mp4", "ptt": "ogg", "audio": "mp3", "sticker": "webp", "document": "bin"}
-        ext = ext_map.get(msg_type, "bin")
-
-        # Handle data: URLs
-        raw_b64 = media_b64
-        if raw_b64.startswith("data:"):
-            parts = raw_b64.split(",", 1)
-            if len(parts) == 2:
-                raw_b64 = parts[1]
-                # Extract extension from mime
-                mime = parts[0].split(";")[0].split(":")[1] if ":" in parts[0] else ""
-                if "png" in mime: ext = "png"
-                elif "webp" in mime: ext = "webp"
-                elif "mp4" in mime: ext = "mp4"
-                elif "ogg" in mime: ext = "ogg"
-
-        try:
-            raw_bytes = base64.b64decode(raw_b64)
-        except:
-            return None
-
-        # Generate filename
-        sender = (data.get("sender", "unknown") or "unknown").split("@")[0]
-        ts = time.strftime("%Y%m%d_%H%M%S")
-        filename = f"WPlus_{sender}_{ts}.{ext}"
-
-        # Save to folder
-        folder = MEDIA_DIRS.get(msg_type, MEDIA_DIRS["document"])
-        filepath = os.path.join(folder, filename)
-        with open(filepath, "wb") as f:
-            f.write(raw_bytes)
-
-        # Return relative path for serving
-        rel = os.path.relpath(filepath, DATA_DIR).replace(os.sep, "/")
-        return rel
+        self._deny(404)
 
     def _ok(self, data):
+        payload = json.dumps(data).encode()
         self.send_response(200)
         self._cors()
         self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(payload)))
         self.end_headers()
-        self.wfile.write(json.dumps(data).encode())
+        self.wfile.write(payload)
 
-def start_server(port=18733):
+def start_server(port=PORT, data_dir=None, token=None):
+    """Start the server in a background thread. Returns the HTTPServer."""
+    global TOKEN
+    configure(data_dir or DATA_DIR)
+    TOKEN = token or secrets.token_urlsafe(32)
     server = HTTPServer(("127.0.0.1", port), Handler)
     t = threading.Thread(target=server.serve_forever, daemon=True)
     t.start()
