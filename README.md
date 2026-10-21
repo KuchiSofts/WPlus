@@ -69,6 +69,8 @@ account, no cloud, no telemetry.
 
 1. Download **`WPlus.exe`** from the [latest release](https://github.com/KuchiSofts/WPlus/releases/latest).
 2. Put it in its own folder (WPlus creates a `data/` folder next to it) and run it.
+   If that folder is not writable (for example `Program Files`), WPlus uses
+   `%LOCALAPPDATA%\WPlus\data` instead.
 3. On first run WPlus enables the debug bridge for WhatsApp Desktop and asks
    you to **restart WhatsApp once** (quit it from the tray, then reopen it).
 4. The **W+** shield appears in the system tray and a WPlus button appears in
@@ -154,7 +156,8 @@ WPlus.exe (tray app)
     removes those automatically.
 - **Optional:** *Run at Startup* adds a `WPlus` value under
   `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`.
-- **Files:** everything else lives in the `data/` folder next to the exe.
+- **Files:** everything else lives in the `data/` folder next to the exe
+  (or in `%LOCALAPPDATA%\WPlus` when the exe folder is not writable).
 
 WhatsApp's own program files are not modified; the plugin lives in the
 running WhatsApp window. It is removed when you quit WPlus and is gone after
@@ -173,7 +176,8 @@ Desktop while it is enabled. See [SECURITY.md](SECURITY.md).
 ## Data & privacy
 
 WPlus has no servers and collects no analytics. Data is stored **unencrypted**
-in `data/` next to the exe:
+in `data/` next to the exe (or `%LOCALAPPDATA%\WPlus\data` when the exe folder
+is not writable):
 
 | Path | Contents |
 |------|----------|
