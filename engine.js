@@ -368,15 +368,18 @@
   // ── View-once capture ─────────────────────────────────────
   function captureViewOnce(msg){
     try{
-      var type=msg.__x_type||'unknown',sender=(msg.__x_from?msg.__x_from._serialized:'?').split('@')[0];
+      var type=msg.__x_type||'unknown',sender=(msg.__x_backupSender||sid(msg.__x_from)||'?').split('@')[0];
       var entry={id:msg.__x_id._serialized,type:type,sender:sender,time:Date.now(),data:null,mime:null,size:0};
+      var done=false;
 
       function saveEntry(){viewOnce('add',entry);fire('update');}
 
       function tryCapture(){
+        if(done)return true;  // later retries stop once the media was read
         try{
           var md=msg.__x_mediaData;
           if(md&&md.mediaBlob&&md.mediaBlob._blob){
+            done=true;
             var blob=md.mediaBlob._blob;
             var r=new FileReader();
             r.onload=function(){entry.data=r.result;entry.mime=blob.type;entry.size=blob.size;saveEntry();
@@ -386,7 +389,7 @@
           // Try force-downloading via WhatsApp's internal API
           if(md&&typeof md.downloadMedia==='function'&&!md.__wplus_dl){
             md.__wplus_dl=true;
-            md.downloadMedia().then(function(){later(tryCapture,1000);}).catch(function(){});
+            Promise.resolve(md.downloadMedia()).then(function(){later(tryCapture,1000);}).catch(function(){});
           }
         }catch(e){}return false;
       }
