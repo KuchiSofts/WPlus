@@ -37,7 +37,7 @@ CDP_PORT = 9222
 # so the debug port is only opened for WhatsApp — not for every WebView2 app.
 WA_EXE_NAMES = ("WhatsApp.Root.exe", "WhatsApp.exe")
 WEBVIEW2_POLICY_KEY = r"Software\Policies\Microsoft\Edge\WebView2\AdditionalBrowserArguments"
-# Our CDP client (PowerShell ClientWebSocket) sends no Origin header, so a specific
+# Our CDP client (cdpbridge.WebSocket) sends no Origin header, so a specific
 # origin here is enough; it stops web pages from opening the DevTools socket.
 WEBVIEW2_ARGS = f"--remote-debugging-port={CDP_PORT} --remote-allow-origins=http://127.0.0.1:{CDP_PORT}"
 
@@ -251,37 +251,11 @@ def get_wa_target():
     except: pass
     return None
 
-def cdp_eval(ws_url, code):
-    cdp = json.dumps({"id": 1, "method": "Runtime.evaluate", "params": {"expression": code, "returnByValue": True}})
-    p = os.path.join(DATA_DIR, "_cdp.json")
-    with open(p, "w", encoding="utf-8") as f: f.write(cdp)
-    try:
-        # Read frames until the whole message arrives (large results such as the
-        # deleted-messages list span many frames), skip any CDP events, and print
-        # the reply for id 1 as UTF-8 so non-ASCII message text survives.
-        r = subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
-            f'[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;'
-            f'$ws=New-Object System.Net.WebSockets.ClientWebSocket;$ct=[System.Threading.CancellationToken]::None;'
-            f'$ws.ConnectAsync([System.Uri]::new("{ws_url}"),$ct).Wait();'
-            f'$msg=[System.IO.File]::ReadAllText("{p}");'
-            f'$b=[System.Text.Encoding]::UTF8.GetBytes($msg);'
-            f'$ws.SendAsync([System.ArraySegment[byte]]::new($b),[System.Net.WebSockets.WebSocketMessageType]::Text,$true,$ct).Wait();'
-            f'$buf=New-Object byte[] 262144;'
-            f'for($i=0;$i -lt 100;$i++){{'
-            f'$ms=New-Object System.IO.MemoryStream;'
-            f'do{{$res=$ws.ReceiveAsync([System.ArraySegment[byte]]::new($buf),$ct).Result;$ms.Write($buf,0,$res.Count)}}'
-            f'while(-not $res.EndOfMessage -and $res.MessageType -ne [System.Net.WebSockets.WebSocketMessageType]::Close);'
-            f'$s=[System.Text.Encoding]::UTF8.GetString($ms.ToArray());'
-            f'if($res.MessageType -eq [System.Net.WebSockets.WebSocketMessageType]::Close){{break}};'
-            f'if($s.StartsWith(\'{{"id":1,\')){{$s;break}}}};$ws.Dispose()'],
-            capture_output=True, encoding="utf-8", errors="replace", timeout=60,
-            creationflags=subprocess.CREATE_NO_WINDOW)
-        os.remove(p)
-        return json.loads(r.stdout.strip()).get("result", {}).get("result", {}).get("value")
-    except:
-        try: os.remove(p)
-        except: pass
-        return None
+def cdp_eval(ws_url, code, timeout=60):
+    """Evaluate JS in the WhatsApp page and return the result value (None on any error).
+    Uses a direct DevTools WebSocket connection: no helper process or temp file, and
+    calls from the tray thread and the service thread cannot interfere."""
+    return cdpbridge.evaluate(ws_url, code, timeout=timeout)
 
 # ── Fast WhatsApp Detection ──────────────────────────────────
 _last_wa_pid = None
