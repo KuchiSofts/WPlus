@@ -3,12 +3,16 @@
   'use strict';
   // Allow re-injection by cleaning up previous instance
   if(window.__wplus&&window.__wplus.cleanup)try{window.__wplus.cleanup();}catch(e){}
-  window.__wplus={version:'2.0.1',ready:false};  // Keep in sync with CURRENT_VERSION in service/wplus.py
+  window.__wplus={version:'2.1.0',ready:false};  // Keep in sync with CURRENT_VERSION in service/wplus.py
 
-  var MAX_MSGS=1000,hooked=false;
+  var MAX_MSGS=1000;
   var CC=null,CON=null,GRP=null;
-  var _comp,_rec,_pres,_seen,_played;
-  var presInt=null,blurObs={};
+  var _comp,_rec,_pres,_seen,_played,_mods={};
+  var presInt=null;
+  // Lifecycle: everything added to WhatsApp is tracked so cleanup() can take it all back
+  var dead=false,_subs=[],_cols=[],_timers={},_onCleanup=[];
+  function listen(col,ev,fn){col.on(ev,fn);_subs.push([col,ev,fn]);}
+  function later(fn,ms){var id=setTimeout(function(){delete _timers[id];if(!dead)fn();},ms);_timers[id]=1;return id;}
 
   // ── Debug system ──────────────────────────────────────────
   // Off by default — the log contains message previews and phone numbers.
@@ -36,9 +40,18 @@
   var LS={
     // A missing key must return the default too (JSON.parse(null) is null, not an error)
     get:function(k,d){try{var v=JSON.parse(localStorage.getItem(k));return v===null||v===undefined?(d===undefined?null:d):v;}catch(e){return d===undefined?null:d;}},
-    set:function(k,v){localStorage.setItem(k,JSON.stringify(v));},
-    del:function(k){localStorage.removeItem(k);}
+    // Never throws: a full localStorage (QuotaExceededError) must not break message capture
+    set:function(k,v){try{localStorage.setItem(k,JSON.stringify(v));return true;}catch(e){dbg('storage','Write failed: '+k+' ('+(e&&e.name)+')');return false;}},
+    del:function(k){try{localStorage.removeItem(k);}catch(e){}}
   };
+  // Media kept in memory when it does not fit in localStorage (this session only)
+  var _memMedia={},_memVO={};
+  function saveDel(d){
+    if(LS.set('wplus_del',d))return true;
+    d.forEach(function(m){if(m&&m.media){if(m.id)_memMedia[m.id]={media:m.media,mime:m.mime};delete m.media;}});
+    while(!LS.set('wplus_del',d)){if(d.length<2)return false;d.splice(0,Math.ceil(d.length/4));}
+    return true;
+  }
 
   function settings(k,v){
     var s=LS.get('wplus_cfg',{});
@@ -67,7 +80,7 @@
     });
     if(added>0){
       if(current.length>MAX_MSGS)current=current.slice(-MAX_MSGS);
-      LS.set('wplus_del',current);
+      saveDel(current);
       dbg('storage','Merged '+added+' msgs from old keys. Total: '+current.length);
     }
   }
@@ -75,14 +88,16 @@
   function deletedMsgs(action,item){
     mergeOldKeys();
     var d=LS.get('wplus_del',[])||[];
+    if(!Array.isArray(d))d=[];
+    d.forEach(function(m){var x=m&&!m.media&&!m.mediaFile&&_memMedia[m.id];if(x){m.media=x.media;if(x.mime)m.mime=x.mime;}});
     if(action==='get')return d;
     if(action==='add'){
       // Deduplicate
       var exists=d.some(function(m){return m.id===item.id;});
-      if(!exists){d.push(item);if(d.length>MAX_MSGS)d=d.slice(-MAX_MSGS);LS.set('wplus_del',d);}
+      if(!exists){d.push(item);if(d.length>MAX_MSGS)d=d.slice(-MAX_MSGS);saveDel(d);}
     }
     if(action==='clear'){
-      LS.del('wplus_del');
+      LS.del('wplus_del');_memMedia={};
       ['wplus_deleted_msgs','wtplus_deleted_msgs','wtplus_del'].forEach(function(k){LS.del(k);});
       serverPost('/deleted/clear',{});
     }
@@ -94,16 +109,27 @@
     if(!r||!r.mediaFile)return;
     var d=deletedMsgs('get');
     for(var i=d.length-1;i>=0;i--){
-      if(d[i].id===id){d[i].mediaFile=r.mediaFile;delete d[i].media;LS.set('wplus_del',d);break;}
+      if(d[i].id===id){d[i].mediaFile=r.mediaFile;delete d[i].media;delete _memMedia[id];saveDel(d);break;}
     }
   }
 
   function viewOnce(action,item){
     var d=LS.get('wplus_vo',[])||[];
+    if(!Array.isArray(d))d=[];
     if(action==='get')return d;
-    if(action==='add'){d.push(item);if(d.length>200)d=d.slice(-200);LS.set('wplus_vo',d);}
-    if(action==='clear'){LS.del('wplus_vo');}
+    if(action==='add'){
+      var idx=d.findIndex(function(x){return x.id===item.id;});
+      if(idx>=0)d[idx]=item;else d.push(item);
+      if(d.length>200)d=d.slice(-200);saveVO(d);
+    }
+    if(action==='clear'){LS.del('wplus_vo');_memVO={};}
     return d;
+  }
+  function saveVO(d){
+    if(LS.set('wplus_vo',d))return true;
+    // Too big for localStorage: keep the media in memory, store the entry without it
+    d.forEach(function(x){if(x&&x.data){_memVO[x.id]=x.data;x.data=null;x.inMemory=true;}});
+    return LS.set('wplus_vo',d);
   }
 
   // ── File Server API (localhost:18733) ────────────────────
@@ -119,9 +145,12 @@
   window.__wplusBridgeReply=function(id,res){var c=_br.cb[id];delete _br.cb[id];if(c)c(res);};
   function hasBridge(){return typeof window.__wplusBridge==='function';}
   function bridge(method,path,body,cb){
-    var id=++_br.n;_br.cb[id]=cb;
+    var id=++_br.n;
+    // Give up on a reply that never comes, so callbacks do not pile up
+    var t=later(function(){var c=_br.cb[id];delete _br.cb[id];if(c)c(null);},120000);
+    _br.cb[id]=function(r){clearTimeout(t);delete _timers[t];cb(r);};
     try{window.__wplusBridge(JSON.stringify({id:id,method:method,path:path,body:body===undefined?null:body}));}
-    catch(e){delete _br.cb[id];cb(null);}
+    catch(e){var c=_br.cb[id];delete _br.cb[id];if(c)c(null);}
   }
   function serverPost(path,data,cb){
     if(hasBridge()){
@@ -166,12 +195,17 @@
   }
 
   // ── Module finder ─────────────────────────────────────────
-  function findExport(name){
+  // One pass over the module map: {name: module object that exports it}
+  function findExports(names){
+    var out={},left=names.length;
     try{var ks=Object.keys(window.require("__debug").modulesMap);
-    for(var i=0;i<ks.length;i++){try{var m=window.require(ks[i]),d=m&&m.default||m;
-    if(d&&typeof d[name]==='function')return d;if(m&&typeof m[name]==='function')return m;}catch(e){}}
-    }catch(e){}return null;
+    for(var i=0;i<ks.length&&left;i++){try{var m=window.require(ks[i]),d=m&&m.default||m;
+    names.forEach(function(n){if(out[n])return;if(d&&typeof d[n]==='function'){out[n]=d;left--;}else if(m&&typeof m[n]==='function'){out[n]=m;left--;}});}catch(e){}}
+    }catch(e){}return out;
   }
+  // Replacements remember the original, so a re-injection that skipped cleanup still restores it
+  function orig(f){return f&&f.__wpOrig||f;}
+  function noop(o){var f=function(){return Promise.resolve();};f.__wpOrig=o;return f;}
 
   function init(){
     try{
@@ -182,189 +216,203 @@
       dbg('init','ChatCollection found',{chats:CC._models.length});
       try{CON=window.require("WAWebContactCollection").ContactCollection;dbg('init','ContactCollection found',{contacts:(CON._models||[]).length});}catch(e){dbg('init','ContactCollection failed',e.message);}
       try{GRP=window.require("WAWebGroupMetadataCollection").GroupMetadataCollection;dbg('init','GroupMetadata found',{groups:(GRP._models||[]).length});}catch(e){}
-      try{var x=findExport("markComposing");if(x){_comp=x.markComposing;_rec=x.markRecording;dbg('init','Composing hooks ready');}}catch(e){}
-      try{var p=findExport("sendPresenceAvailable");if(p){_pres=p.sendPresenceAvailable;dbg('init','Presence hook ready');}}catch(e){}
-      try{var s=findExport("sendConversationSeen");if(s){_seen=s.sendConversationSeen;dbg('init','ConversationSeen hook ready');}}catch(e){}
-      try{var pl=findExport("markPlayed");if(pl){_played=pl.markPlayed;dbg('init','markPlayed hook ready');}}catch(e){}
+      var fx=findExports(["markComposing","sendPresenceAvailable","sendPresenceUnavailable","sendConversationSeen","markPlayed"]);
+      _mods={comp:fx.markComposing,pres:fx.sendPresenceAvailable,unav:fx.sendPresenceUnavailable,seen:fx.sendConversationSeen,played:fx.markPlayed};
+      if(_mods.comp){_comp=orig(_mods.comp.markComposing);_rec=orig(_mods.comp.markRecording);dbg('init','Composing hooks ready');}
+      if(_mods.pres){_pres=orig(_mods.pres.sendPresenceAvailable);dbg('init','Presence hook ready');}
+      if(_mods.seen){_seen=orig(_mods.seen.sendConversationSeen);dbg('init','ConversationSeen hook ready');}
+      if(_mods.played){_played=orig(_mods.played.markPlayed);dbg('init','markPlayed hook ready');}
       return true;
     }catch(e){dbg('init','FATAL',e.message);return false;}
   }
 
   // ── Message hooks ─────────────────────────────────────────
+  var HEADER='\u{1F6AB} *This message was deleted:*\n';
+  var MEDIA_T=['image','video','sticker','document','audio','ptt'];
+  var CAPTURE_T=['chat','image','video','ptt','audio','document','sticker','vcard','location'];
+  // Wids still carry _serialized; message keys (MsgKey) no longer do on current builds, only toString()
+  function sid(w){if(!w)return '';if(w._serialized)return w._serialized;if(typeof w.toString==='function'&&w.toString!==Object.prototype.toString){var s=String(w);return /_/.test(s)?s:'';}return '';}
+  function chatTitle(chat){return chat.__x_name||chat.__x_formattedTitle||(chat.id?chat.id.user:'?');}
+  // Text for a deleted message that cannot be shown as media again (its media data is gone)
+  function placeholder(type,caption,body,lat,lng){
+    if(type==='location')return '\u{1F4CD} Location'+(lat!=null&&lng!=null?' '+lat+', '+lng:'');
+    var lbl={image:'\u{1F4F7} Photo',video:'\u{1F3AC} Video',sticker:'\u{1F3A8} Sticker',document:'\u{1F4C4} Document',audio:'\u{1F3B5} Audio',ptt:'\u{1F3A4} Voice message'}[type];
+    return lbl?lbl+(caption?'\n'+caption:''):(body||'');
+  }
   function restoreMsg(msg){
     try{
-      var header='\u{1F6AB} *This message was deleted:*\n';
-      var mt=['image','video','sticker','document','audio','ptt'];
-      if(mt.indexOf(msg.__x_backupType)!==-1){
+      if(MEDIA_T.indexOf(msg.__x_backupType)!==-1&&msg.__x_backupMediaData){
         msg.__x_type=msg.__x_backupType;msg.__x_body=msg.__x_backupBody;
-        msg.__x_text=header+(msg.__x_backupText||'');
-        msg.__x_caption=header+(msg.__x_backupCaption||'');
+        msg.__x_text=HEADER+(msg.__x_backupText||'');
+        msg.__x_caption=HEADER+(msg.__x_backupCaption||'');
         msg.__x_mediaData=msg.__x_backupMediaData;msg.__x_isMMS=true;msg.__x_isMedia=true;
       }else{
-        msg.__x_type='chat';
-        var body=msg.__x_backupBody||msg.__x_backupText||'';
-        msg.__x_body=header+body;
-        msg.__x_text=header+body;
+        var body=placeholder(msg.__x_backupType,msg.__x_backupCaption,msg.__x_backupBody||msg.__x_backupText||'',msg.__x_backupLat,msg.__x_backupLng);
+        msg.__x_type='chat';msg.__x_body=HEADER+body;msg.__x_text=HEADER+body;
       }
-      msg.__x_isRevoked=false;
-      dbg('restore','Msg restored: '+(msg.__x_backupType||'chat')+' | '+(msg.__x_backupBody||'').substring(0,30));
+      msg.__x_isRevoked=false;msg.__wpRestored=true;
+      dbg('restore','Msg restored: '+(msg.__x_backupType||'chat')+' | '+String(msg.__x_backupBody||'').substring(0,30));
     }catch(e){dbg('restore','Error: '+e.message);}
   }
 
-  var _hookCount=0;
-  function hookChat(chat){
-    if(!chat||!chat.msgs||chat.msgs.__wp)return;chat.msgs.__wp=true;
-    _hookCount++;
-    var chatName=chat.__x_name||chat.__x_formattedTitle||(chat.id?chat.id.user:'?');
-
-    chat.msgs.on('add',function(msg){try{
-      if(!msg||!msg.isNewMsg||(msg.id&&msg.id.fromMe))return;
-      var ok=['chat','image','video','ptt','audio','document','sticker','vcard','location'];
-      if(ok.indexOf(msg.__x_type)===-1)return;
-
-      // Full message details for debug
-      var msgId=(msg.__x_id&&msg.__x_id._serialized)?msg.__x_id._serialized:'?';
-      var sender=(msg.__x_from&&msg.__x_from._serialized)?msg.__x_from._serialized:'?';
+  // Keep a copy of an incoming message on the model itself (for every loaded message, not only new ones,
+  // so a message that was already on screen when WPlus started can still be restored)
+  function backup(msg){
+    if(!msg||msg.__x_backupType||msg.__wpRestored)return false;
+    var mid=msg.__x_id||msg.id;if(!mid||mid.fromMe)return false;
+    if(CAPTURE_T.indexOf(msg.__x_type)===-1)return false;
+    msg.__x_backupBody=msg.__x_body;msg.__x_backupText=msg.__x_text;msg.__x_backupType=msg.__x_type;
+    msg.__x_backupCaption=msg.__x_caption;msg.__x_backupMediaData=msg.__x_mediaData;
+    msg.__x_backupLat=msg.__x_lat;msg.__x_backupLng=msg.__x_lng;
+    // In groups __x_from is the group JID; the actual sender is __x_author
+    msg.__x_backupTime=Date.now();msg.__x_backupSender=sid(msg.__x_author)||sid(msg.__x_from)||'?';
+    return true;
+  }
+  // An edit updates the same model: keep the latest text so a later delete saves what was last shown
+  function noteEdit(msg){
+    if(msg.__wpRestored||msg.__x_type!==msg.__x_backupType)return;
+    if(msg.__x_body&&msg.__x_body!==msg.__x_backupBody){msg.__x_backupBody=msg.__x_body;msg.__x_backupText=msg.__x_text;}
+    if(msg.__x_caption&&msg.__x_caption!==msg.__x_backupCaption)msg.__x_backupCaption=msg.__x_caption;
+    if(msg.__x_mediaData&&!msg.__x_backupMediaData)msg.__x_backupMediaData=msg.__x_mediaData;
+  }
+  // Send a newly received message to the file server (once)
+  function postNew(msg,chat){
+    if(msg.__wpPosted||!(msg.isNewMsg||msg.__x_isNewMsg))return;msg.__wpPosted=true;
+    var msgId=sid(msg.__x_id)||'?',sender=msg.__x_backupSender||'?';
+    var isViewOnce=!!(msg.__x_isViewOnce||msg.__x_viewOnce);
+    if(debugEnabled){
       var senderName='';
-      var actualSender=sender;
-      // In groups, __x_from is group JID — actual sender is in __x_author
+      try{var c=CON&&CON.get?CON.get(sender):null;if(c)senderName=c.__x_name||c.__x_pushname||c.__x_formattedName||'';}catch(e){}
+      dbg('msg:new','NEW MESSAGE',{id:msgId.substring(0,50),type:msg.__x_type,chat:chatTitle(chat),sender:sender.split('@')[0],senderName:senderName,
+        bodyLength:(msg.__x_body||'').length,bodyPreview:String(msg.__x_body||'').substring(0,50).replace(/[\n\r]/g,' '),
+        hasMedia:!!(msg.__x_mediaData&&msg.__x_mediaData.mediaBlob),caption:String(msg.__x_caption||'').substring(0,50),isViewOnce:isViewOnce,
+        isGroupMsg:!!(chat.id&&chat.id.server==='g.us'),msgTimestamp:msg.__x_t||0});
+    }
+    var entry={id:msgId,type:msg.__x_type,body:msg.__x_body||'',text:msg.__x_text||'',
+      caption:msg.__x_caption||'',sender:sender,time:Date.now(),chat:chatTitle(chat)};
+    var md=msg.__x_mediaData;
+    if(md&&md.mediaBlob&&md.mediaBlob._blob){
+      var blob=md.mediaBlob._blob;
+      dbg('msg:new','Media blob captured: '+blob.type+' ('+Math.round(blob.size/1024)+'KB)');
+      var reader=new FileReader();
+      reader.onload=function(){entry.media=reader.result;serverPost('/msg/new',entry);};
+      reader.onerror=function(){serverPost('/msg/new',entry);};
+      reader.readAsDataURL(blob);
+    }else serverPost('/msg/new',entry);
+    if(isViewOnce){dbg('msg:new','VIEW-ONCE detected! Capturing...');captureViewOnce(msg);}
+  }
+
+  function onRevoked(msg,chat){
+    if(msg.__wpSaved){restoreMsg(msg);return;}  // WhatsApp marked it revoked again — already saved
+    msg.__wpSaved=true;
+    var msgId=msg.__wpOrigId||sid(msg.__x_id)||'?';
+    var sender=msg.__x_backupSender||'?';
+    dbg('msg:del','MESSAGE DELETED',{id:msgId.substring(0,50),originalType:msg.__x_backupType,chat:chatTitle(chat),sender:sender.split('@')[0],
+      bodyPreview:String(msg.__x_backupBody||msg.__x_backupText||'').substring(0,60).replace(/[\n\r]/g,' '),
+      caption:String(msg.__x_backupCaption||'').substring(0,40),hasMediaBackup:!!(msg.__x_backupMediaData&&msg.__x_backupMediaData.mediaBlob),
+      timeSinceReceived:Math.round((Date.now()-(msg.__x_backupTime||Date.now()))/1000)+'s'});
+
+    // Message time (seconds → ms) lets later sessions match the revoked placeholder exactly
+    var entry={id:msgId,type:msg.__x_backupType,body:msg.__x_backupBody,
+      text:msg.__x_backupText,caption:msg.__x_backupCaption,sender:sender,
+      time:msg.__x_t?msg.__x_t*1000:(msg.__x_backupTime||Date.now()),chat:chatTitle(chat),media:null};
+    if(msg.__x_backupType==='location'&&msg.__x_backupLat!=null){entry.lat=msg.__x_backupLat;entry.lng=msg.__x_backupLng;}
+
+    serverPost('/msg/deleted',entry,function(r){noteMediaFile(entry.id,r);});
+
+    // Try to capture media blob for images/videos/audio
+    if(['image','video','ptt','audio','sticker'].indexOf(msg.__x_backupType)!==-1){
       try{
-        if(msg.__x_author&&msg.__x_author._serialized)actualSender=msg.__x_author._serialized;
-        if(CON&&actualSender){
-          var c=CON.get?CON.get(actualSender):null;
-          if(c)senderName=c.__x_name||c.__x_pushname||c.__x_formattedName||'';
-        }
-      }catch(e){}
-      var hasMedia=!!(msg.__x_mediaData&&msg.__x_mediaData.mediaBlob);
-      var hasCaption=!!(msg.__x_caption&&msg.__x_caption.length>0);
-      var bodyLen=(msg.__x_body||'').length;
-      var isViewOnce=!!(msg.__x_isViewOnce||msg.__x_viewOnce);
-      var timestamp=msg.__x_t?new Date(msg.__x_t*1000).toLocaleString():'?';
+        var md=msg.__x_backupMediaData||msg.__x_mediaData;
+        if(md&&md.mediaBlob&&md.mediaBlob._blob){
+          var blob=md.mediaBlob._blob;
+          dbg('msg:del','Media blob found: '+blob.type+' ('+Math.round(blob.size/1024)+'KB)');
+          var reader=new FileReader();
+          reader.onload=function(){try{
+            entry.media=reader.result;entry.mime=blob.type;
+            var d=deletedMsgs('get');
+            for(var i=d.length-1;i>=0;i--){if(d[i].id===entry.id){d[i].media=entry.media;d[i].mime=entry.mime;break;}}
+            saveDel(d);
+            serverPost('/msg/deleted',entry,function(r){noteMediaFile(entry.id,r);});
+            dbg('msg:del','Media sent to file server');
+          }catch(e){dbg('msg:del','Media save error: '+e.message);}};
+          reader.readAsDataURL(blob);
+        }else dbg('msg:del','No media blob available for '+msg.__x_backupType+' message');
+      }catch(e){dbg('msg:del','Media capture error: '+e.message);}
+    }
 
-      dbg('msg:new','NEW MESSAGE',{
-        id:msgId.substring(0,50),
-        type:msg.__x_type,
-        chat:chatName,
-        chatJid:sender.split('@')[0],
-        sender:actualSender.split('@')[0],
-        senderName:senderName,
-        bodyLength:bodyLen,
-        bodyPreview:(msg.__x_body||'').substring(0,50).replace(/[\n\r]/g,' '),
-        hasMedia:hasMedia,
-        hasCaption:hasCaption,
-        caption:hasCaption?(msg.__x_caption||'').substring(0,50):'',
-        isViewOnce:isViewOnce,
-        timestamp:timestamp,
-        forwardCount:msg.__x_forwardingScore||0,
-        isStarred:msg.__x_star===true,
-        quotedMsgId:msg.__x_quotedMsg&&msg.__x_quotedMsg.__x_id?msg.__x_quotedMsg.__x_id._serialized.substring(0,30):'',
-        isGroupMsg:!!(chat.id&&chat.id.server==='g.us'),
-        msgTimestamp:msg.__x_t||0
-      });
+    deletedMsgs('add',entry);
+    restoreMsg(msg);
+    dbg('msg:del','Saved and restored in chat UI');
+    fire('update');
+  }
 
-      // Backup
-      msg.__x_backupBody=msg.__x_body;msg.__x_backupText=msg.__x_text;msg.__x_backupType=msg.__x_type;
-      msg.__x_backupCaption=msg.__x_caption;msg.__x_backupMediaData=msg.__x_mediaData;
-      msg.__x_backupTime=Date.now();msg.__x_backupSender=sender;
+  // Current WhatsApp handles "delete for everyone" by REMOVING the original message and ADDING a new
+  // 'revoked' message whose protocolMessageKey points to the original (WAWebDBProcessRevokeMsgs).
+  // The two events can arrive in either order, so each side waits briefly for the other.
+  var _removed={},_pendingRev={},PAIR_MS=120000;
+  var BK_FIELDS=['__x_backupBody','__x_backupText','__x_backupType','__x_backupCaption','__x_backupMediaData','__x_backupLat','__x_backupLng','__x_backupTime','__x_backupSender'];
+  function origKey(msg){var k=msg&&(msg.__x_protocolMessageKey||msg.protocolMessageKey);return k?(sid(k)||String(k)):null;}
+  function prunePairs(){var t=Date.now()-PAIR_MS;[_removed,_pendingRev].forEach(function(o){Object.keys(o).forEach(function(k){if(o[k].t<t)delete o[k];});});}
+  function takeOver(orig,rev,chat){
+    if(rev.__wpSaved)return;
+    BK_FIELDS.forEach(function(f){rev[f]=orig[f];});
+    rev.__wpOrigId=sid(orig.__x_id);orig.__wpSaved=true;
+    onRevoked(rev,chat);
+    // The revoked model may already be on screen: tell WhatsApp's views to re-read it
+    try{if(rev.trigger){rev.trigger('change:type',rev,rev.__x_type);rev.trigger('change:body',rev,rev.__x_body);}}catch(e){}
+  }
+  function onRevokedAdded(msg,chat){
+    var k=origKey(msg);if(!k||msg.__wpSaved)return false;
+    var r=_removed[k],orig=r&&r.m;
+    if(!orig){try{var live=chat.msgs.get&&chat.msgs.get(k);if(live&&live!==msg)orig=live;}catch(e){}}
+    if(orig&&orig.__x_backupType){delete _removed[k];takeOver(orig,msg,chat);return true;}
+    _pendingRev[k]={m:msg,t:Date.now()};prunePairs();
+    return false;
+  }
+  function onRemoved(msg,chat){
+    if(!msg||!msg.__x_backupType||msg.__wpSaved)return;
+    var k=sid(msg.__x_id);if(!k)return;
+    var p=_pendingRev[k];if(p){delete _pendingRev[k];takeOver(msg,p.m,chat);return;}
+    _removed[k]={m:msg,t:Date.now()};prunePairs();
+  }
 
-      // Save to file server
-      var entry={id:msgId,type:msg.__x_type,body:msg.__x_body||'',text:msg.__x_text||'',
-        caption:msg.__x_caption||'',sender:sender,time:Date.now(),chat:chatName};
+  // Runs inside WhatsApp's collection 'add' — must never throw
+  function hookChat(chat){try{hookChatMsgs(chat);}catch(e){if(chat&&chat.msgs)delete chat.msgs.__wp;dbg('init','hookChat failed: '+e.message);}}
+  function hookChatMsgs(chat){
+    if(!chat||!chat.msgs||chat.msgs.__wp)return;chat.msgs.__wp=true;_cols.push(chat.msgs);
+    (chat.msgs._models||[]).forEach(function(m){try{if(backup(m))postNew(m,chat);}catch(e){}});
 
-      var md=msg.__x_mediaData;
-      if(md&&md.mediaBlob&&md.mediaBlob._blob){
-        var blob=md.mediaBlob._blob;
-        dbg('msg:new','Media blob captured: '+blob.type+' ('+Math.round(blob.size/1024)+'KB)');
-        var reader=new FileReader();
-        reader.onload=function(){entry.media=reader.result;serverPost('/msg/new',entry);};
-        reader.readAsDataURL(blob);
-      } else {
-        serverPost('/msg/new',entry);
-        if(hasMedia)dbg('msg:new','Media blob NOT available (will try later)');
-      }
-
-      if(isViewOnce){dbg('msg:new','VIEW-ONCE detected! Capturing...');captureViewOnce(msg);}
+    listen(chat.msgs,'add',function(msg){try{
+      if(msg&&msg.__x_type==='revoked'){onRevokedAdded(msg,chat);return;}
+      if(backup(msg))postNew(msg,chat);
     }catch(e){dbg('msg:new','ERROR: '+e.message);}});
+    listen(chat.msgs,'remove',function(msg){try{onRemoved(msg,chat);}catch(e){dbg('msg:del','REMOVE HANDLER ERROR: '+e.message);}});
 
-    chat.msgs.on('change',function(msg){try{
-      if(!msg||msg.__x_type!=='revoked'||!msg.__x_backupType)return;
-
-      var msgId=msg.__x_id?msg.__x_id._serialized:'?';
-      var sender=msg.__x_backupSender||'?';
-      var timeSinceBackup=Date.now()-(msg.__x_backupTime||Date.now());
-      var hasBackupMedia=!!(msg.__x_backupMediaData&&msg.__x_backupMediaData.mediaBlob);
-
-      dbg('msg:del','MESSAGE DELETED',{
-        id:msgId.substring(0,50),
-        originalType:msg.__x_backupType,
-        chat:chatName,
-        sender:sender.split('@')[0],
-        bodyPreview:(msg.__x_backupBody||msg.__x_backupText||'').substring(0,60).replace(/[\n\r]/g,' '),
-        bodyLength:(msg.__x_backupBody||'').length,
-        hasCaption:!!(msg.__x_backupCaption),
-        caption:(msg.__x_backupCaption||'').substring(0,40),
-        hasMediaBackup:hasBackupMedia,
-        timeSinceReceived:Math.round(timeSinceBackup/1000)+'s',
-        backupTime:msg.__x_backupTime?new Date(msg.__x_backupTime).toLocaleString():'?'
-      });
-
-      var entry={id:msgId,type:msg.__x_backupType,body:msg.__x_backupBody,
-        text:msg.__x_backupText,caption:msg.__x_backupCaption,sender:sender,
-        time:msg.__x_backupTime||Date.now(),chat:chatName,media:null};
-
-      serverPost('/msg/deleted',entry,function(r){noteMediaFile(entry.id,r);});
-      dbg('msg:del','Sent to file server for permanent storage');
-
-      // Try to capture media blob for images/videos/audio
-      var mediaTypes=['image','video','ptt','audio','sticker'];
-      if(mediaTypes.indexOf(msg.__x_backupType)!==-1){
-        try{
-          var md=msg.__x_backupMediaData||msg.__x_mediaData;
-          if(md&&md.mediaBlob&&md.mediaBlob._blob){
-            var blob=md.mediaBlob._blob;
-            dbg('msg:del','Media blob found: '+blob.type+' ('+Math.round(blob.size/1024)+'KB)');
-            var reader=new FileReader();
-            reader.onload=function(){
-              entry.media=reader.result;entry.mime=blob.type;
-              dbg('msg:del','Media captured as base64 ('+Math.round(reader.result.length/1024)+'KB)');
-              var d=deletedMsgs('get');
-              for(var i=d.length-1;i>=0;i--){if(d[i].id===entry.id){d[i].media=entry.media;d[i].mime=entry.mime;break;}}
-              LS.set('wplus_del',d);
-              serverPost('/msg/deleted',entry,function(r){noteMediaFile(entry.id,r);});
-              dbg('msg:del','Media sent to file server');
-            };
-            reader.readAsDataURL(blob);
-          } else {
-            dbg('msg:del','No media blob available for '+msg.__x_backupType+' message');
-          }
-        }catch(e){dbg('msg:del','Media capture error: '+e.message);}
-      }
-
-      deletedMsgs('add',entry);
-      dbg('msg:del','Saved to localStorage ('+deletedMsgs('get').length+' total)');
-      restoreMsg(msg);
-      dbg('msg:del','Message restored in chat UI');
-      fire('update');
+    // Older WhatsApp builds revoke by changing the type to 'revoked' on the same model.
+    // A message can also arrive undecrypted ('ciphertext') and only become 'chat' later.
+    listen(chat.msgs,'change',function(msg){try{
+      if(!msg)return;
+      if(msg.__x_type!=='revoked'){if(msg.__x_backupType)noteEdit(msg);else if(backup(msg))postNew(msg,chat);return;}
+      if(msg.__x_backupType)onRevoked(msg,chat);
     }catch(e){dbg('msg:del','HANDLER ERROR: '+e.message);}});
   }
 
   // ── View-once capture ─────────────────────────────────────
   function captureViewOnce(msg){
     try{
-      var type=msg.__x_type||'unknown',sender=(msg.__x_from?msg.__x_from._serialized:'?').split('@')[0];
-      var entry={id:msg.__x_id._serialized,type:type,sender:sender,time:Date.now(),data:null,mime:null,size:0};
+      var type=msg.__x_type||'unknown',sender=(msg.__x_backupSender||sid(msg.__x_from)||'?').split('@')[0];
+      var entry={id:sid(msg.__x_id),type:type,sender:sender,time:Date.now(),data:null,mime:null,size:0};
+      var done=false;
 
-      function saveEntry(){
-        var list=viewOnce('get');var idx=list.findIndex(function(x){return x.id===entry.id;});
-        if(idx>=0)list[idx]=entry;else list.push(entry);
-        if(list.length>200)list=list.slice(-200);
-        LS.set('wplus_vo',list);fire('update');
-      }
+      function saveEntry(){viewOnce('add',entry);fire('update');}
 
       function tryCapture(){
+        if(done)return true;  // later retries stop once the media was read
         try{
           var md=msg.__x_mediaData;
           if(md&&md.mediaBlob&&md.mediaBlob._blob){
+            done=true;
             var blob=md.mediaBlob._blob;
             var r=new FileReader();
             r.onload=function(){entry.data=r.result;entry.mime=blob.type;entry.size=blob.size;saveEntry();
@@ -374,7 +422,7 @@
           // Try force-downloading via WhatsApp's internal API
           if(md&&typeof md.downloadMedia==='function'&&!md.__wplus_dl){
             md.__wplus_dl=true;
-            md.downloadMedia().then(function(){setTimeout(tryCapture,1000);}).catch(function(){});
+            Promise.resolve(md.downloadMedia()).then(function(){later(tryCapture,1000);}).catch(function(){});
           }
         }catch(e){}return false;
       }
@@ -382,10 +430,10 @@
       // Also try to prevent view-once flag from blocking re-views
       try{msg.__x_isViewOnce=false;msg.__x_viewOnce=false;}catch(e){}
 
-      viewOnce('add',entry);saveEntry();
+      saveEntry();
       // Multiple retry attempts — media may load at different times
       if(!tryCapture()){
-        [2000,5000,10000,20000,30000].forEach(function(d){setTimeout(tryCapture,d);});
+        [2000,5000,10000,20000,30000].forEach(function(d){later(tryCapture,d);});
       }
     }catch(e){}
   }
@@ -393,10 +441,13 @@
   // ── Toggle features ───────────────────────────────────────
   function applyToggle(id,on){
     dbg('toggle',id+' → '+(on?'ON':'OFF'));
-    if(id==='hideTyping'){var c=findExport("markComposing");if(c&&_comp){if(on){c.markComposing=function(){};c.markRecording=function(){};dbg('toggle','Typing indicator hooked');}else{c.markComposing=_comp;if(_rec)c.markRecording=_rec;dbg('toggle','Typing indicator restored');}}else dbg('toggle','markComposing not available');}
-    if(id==='hideOnline'){var p=findExport("sendPresenceAvailable");if(p&&_pres){if(on){p.sendPresenceAvailable=function(){};if(!presInt){var u=findExport("sendPresenceUnavailable");if(u){presInt=setInterval(function(){try{u.sendPresenceUnavailable();}catch(e){}},1000);dbg('toggle','Presence set to unavailable (1s interval)');}}dbg('toggle','Online status hidden');}else{p.sendPresenceAvailable=_pres;if(presInt){clearInterval(presInt);presInt=null;}dbg('toggle','Online status restored');}}else dbg('toggle','sendPresenceAvailable not available');}
-    if(id==='disableReceipts'){var s=findExport("sendConversationSeen");if(s&&_seen){if(on){s.sendConversationSeen=function(){return Promise.resolve();};dbg('toggle','Read receipts disabled');}else{s.sendConversationSeen=_seen;dbg('toggle','Read receipts restored');}}else dbg('toggle','sendConversationSeen not available');}
-    if(id==='playAudioPrivate'){var pl=findExport("markPlayed");if(pl&&_played){if(on){pl.markPlayed=function(){};dbg('toggle','Audio play status hidden');}else{pl.markPlayed=_played;dbg('toggle','Audio play status restored');}}else dbg('toggle','markPlayed not available');}
+    // Replacements return a Promise like the originals, so WhatsApp's own .then() chains keep working
+    try{
+    if(id==='hideTyping'){var c=_mods.comp;if(c&&_comp){if(on){c.markComposing=noop(_comp);if(_rec)c.markRecording=noop(_rec);dbg('toggle','Typing indicator hooked');}else{c.markComposing=_comp;if(_rec)c.markRecording=_rec;dbg('toggle','Typing indicator restored');}}else dbg('toggle','markComposing not available');}
+    if(id==='hideOnline'){var p=_mods.pres;if(p&&_pres){if(on){p.sendPresenceAvailable=noop(_pres);if(!presInt){var u=_mods.unav;if(u){presInt=setInterval(function(){try{var r=u.sendPresenceUnavailable();if(r&&r.catch)r.catch(function(){});}catch(e){}},1000);dbg('toggle','Presence set to unavailable (1s interval)');}}dbg('toggle','Online status hidden');}else{p.sendPresenceAvailable=_pres;if(presInt){clearInterval(presInt);presInt=null;}dbg('toggle','Online status restored');}}else dbg('toggle','sendPresenceAvailable not available');}
+    if(id==='disableReceipts'){var s=_mods.seen;if(s&&_seen){if(on){s.sendConversationSeen=noop(_seen);dbg('toggle','Read receipts disabled');}else{s.sendConversationSeen=_seen;dbg('toggle','Read receipts restored');}}else dbg('toggle','sendConversationSeen not available');}
+    if(id==='playAudioPrivate'){var pl=_mods.played;if(pl&&_played){if(on){pl.markPlayed=noop(_played);dbg('toggle','Audio play status hidden');}else{pl.markPlayed=_played;dbg('toggle','Audio play status restored');}}else dbg('toggle','markPlayed not available');}
+    }catch(e){dbg('toggle',id+' failed: '+e.message);}
     // Blur: inject/remove <style> tags — CSS auto-applies to all elements including new ones
     var sidebarPreview='#pane-side [data-testid="cell-frame-secondary"] > :first-child';
     // Message bubbles: current WhatsApp marks them with data-testid="msg-container"
@@ -448,14 +499,14 @@
     };
     // Build CSS — add blur + hover-reveal, exclude tiny images (<25px = emojis/reactions/icons)
     var _builtCSS={};
-    Object.keys(blurCSS).forEach(function(id){
-      var sels=blurCSS[id];
-      var blurPx=id==='blurAvatar'?'10':id==='blurPhotos'?'8':'5';
+    Object.keys(blurCSS).forEach(function(k){
+      var sels=blurCSS[k];
+      var blurPx=k==='blurAvatar'?'10':k==='blurPhotos'?'8':'5';
       // For photos: add min-width/height filter to exclude emojis and reaction images
-      var extraFilter=id==='blurPhotos'?':not([width="17"]):not([height="17"]):not([width="20"]):not([height="20"])':'';
-      var sel=sels.map(function(s){return s+extraFilter;}).join(',');
-      var hov=sels.map(function(s){return s+extraFilter+':hover';}).join(',');
-      _builtCSS[id]=sel+'{filter:blur('+blurPx+'px)!important;transition:filter .15s!important}'+hov+'{filter:none!important}';
+      var extraFilter=k==='blurPhotos'?':not([width="17"]):not([height="17"]):not([width="20"]):not([height="20"])':'';
+      var sel=sels.map(function(x){return x+extraFilter;}).join(',');
+      var hov=sels.map(function(x){return x+extraFilter+':hover';}).join(',');
+      _builtCSS[k]=sel+'{filter:blur('+blurPx+'px)!important;transition:filter .15s!important}'+hov+'{filter:none!important}';
     });
     // Avoid stacked filters so hovering the preview reveals all of its text.
     _builtCSS.blurMessages+=sidebarPreview+' *{filter:none!important}';
@@ -465,7 +516,7 @@
     if(_builtCSS[id]){
       var styleId='wplus-css-'+id;
       var existing=document.getElementById(styleId);
-      if(on&&!existing){var s=document.createElement('style');s.id=styleId;s.textContent=_builtCSS[id];document.head.appendChild(s);dbg('toggle','CSS injected: '+id+' ('+blurCSS[id].length+' selectors)');}
+      if(on&&!existing){var st=document.createElement('style');st.id=styleId;st.textContent=_builtCSS[id];document.head.appendChild(st);dbg('toggle','CSS injected: '+id+' ('+blurCSS[id].length+' selectors)');}
       else if(!on&&existing){existing.remove();dbg('toggle','CSS removed: '+id);}
     }
   }
@@ -474,16 +525,13 @@
 
   // ── Navigate to message + load older msgs + restore ─────
   function findChatByJid(jid){
+    var user=jid.split('@')[0];
+    try{var c=CC.get&&CC.get(jid);if(c)return c;}catch(e){}
     var models=CC._models||[];
     for(var i=0;i<models.length;i++){
-      if(models[i].id&&(models[i].id._serialized===jid||models[i].id.user===jid.split('@')[0]))return models[i];
+      if(models[i].id&&(models[i].id._serialized===jid||models[i].id.user===user))return models[i];
     }
-    // Partial match
-    var user=jid.split('@')[0];
-    for(var j=0;j<models.length;j++){
-      if(models[j].id&&models[j].id._serialized&&models[j].id._serialized.indexOf(user)!==-1)return models[j];
-    }
-    return null;
+    return null;  // no substring guess: it could open somebody else's chat
   }
 
   function extractJid(msgId){
@@ -492,6 +540,18 @@
     var rest=msgId.substring(firstUs+1);
     var m=rest.match(/^(.+?@[cgs]\.us)/);
     return m?m[1]:rest.split('_')[0];
+  }
+  // Chat part ("123@c.us") of a serialized message id ("false_123@c.us_ABC[_author]")
+  function idUser(msgId){return (String(msgId||'').split('_')[1]||'').split('@')[0];}
+
+  function activeChat(){
+    try{var a=CC.getActive&&CC.getActive();if(a)return a;}catch(e){}
+    var models=CC._models||[];
+    for(var i=0;i<models.length;i++)if(models[i].__x_active)return models[i];
+    var headerName='';
+    try{var hdr=document.querySelector('#main header span[dir="auto"], [data-testid="conversation-header"] span[dir="auto"]');if(hdr)headerName=hdr.textContent.trim();}catch(e){}
+    if(headerName)for(var j=0;j<models.length;j++)if(models[j].__x_name===headerName||models[j].__x_formattedTitle===headerName)return models[j];
+    return null;
   }
 
   function openChat(chat){
@@ -513,31 +573,24 @@
       var Cmd=window.require("WAWebCmd").Cmd;
       var search=window.require("WAWebChatMessageSearch");
       if(Cmd&&Cmd.openChatAt&&search&&search.getSearchContext){
-        var ctx=search.getSearchContext(chat,msgObj.__x_id||msgObj.id);
-        Cmd.openChatAt({chat:chat,msgContext:ctx}).then(function(){
+        // Current WhatsApp takes one options object: {chat, msgKey}
+        var key=msgObj.__x_id||msgObj.id,ctx=search.getSearchContext.length===1?search.getSearchContext({chat:chat,msgKey:key}):search.getSearchContext(chat,key);
+        Promise.resolve(Cmd.openChatAt({chat:chat,msgContext:ctx})).then(function(){
           // Flash highlight the message in the DOM
-          setTimeout(function(){
+          later(function(){
             try{
-              var mid=msgObj.__x_id?msgObj.__x_id._serialized:'';
-              var el=document.querySelector('[data-id="'+mid+'"]');
-              if(!el){
-                // Try finding by approximate position — look for restored messages
-                document.querySelectorAll('.message-in, .message-out, [data-id]').forEach(function(m){
-                  var text=m.textContent||'';
-                  if(text.indexOf('\u{1F6AB}')!==-1&&text.indexOf('This message was deleted')!==-1){
-                    el=el||m;
-                  }
-                });
-              }
+              // Rows carry the short message id (id.id); older builds used the serialized id
+              var k=msgObj.__x_id,esc=function(v){return window.CSS&&CSS.escape?CSS.escape(v):v;};
+              var el=k&&((k.id&&document.querySelector('[data-id="'+esc(k.id)+'"]'))||(sid(k)&&document.querySelector('[data-id="'+esc(sid(k))+'"]')));
               if(el){
                 el.classList.add('wplus-msg-highlight');
                 el.scrollIntoView({behavior:'smooth',block:'center'});
-                setTimeout(function(){el.classList.remove('wplus-msg-highlight');},3000);
+                later(function(){el.classList.remove('wplus-msg-highlight');},3000);
                 dbg('nav','Message highlighted');
               }
             }catch(e){}
           },500);
-        });
+        }).catch(function(e){dbg('nav','openChatAt failed: '+(e&&e.message));});
         dbg('nav','Scrolled to message');
         return true;
       }
@@ -545,16 +598,16 @@
     return false;
   }
 
-  // Find a revoked message in chat that matches our saved data
+  // Find the message in the chat that matches our saved data
   function findRevokedInChat(chat,saved){
     if(!chat||!chat.msgs||!chat.msgs._models)return null;
     var msgTime=saved.time;
     var bestMatch=null,bestDiff=Infinity;
     for(var i=0;i<chat.msgs._models.length;i++){
       var m=chat.msgs._models[i];
+      // Exact ID match — also when it was already restored (then it is no longer 'revoked')
+      if(m.__x_id&&sid(m.__x_id)===saved.id)return m;
       if(m.__x_type!=='revoked')continue;
-      // Exact ID match (same session) — instant return
-      if(m.__x_id&&m.__x_id._serialized===saved.id)return m;
       // Time-based match — find the closest revoked message within 60 seconds
       var mTime=m.__x_t?m.__x_t*1000:0;
       if(mTime&&msgTime){
@@ -564,7 +617,6 @@
     }
     if(bestMatch)dbg('nav','Time-matched revoked msg (diff: '+Math.round(bestDiff/1000)+'s)');
     return bestMatch;
-    return null;
   }
 
   // Main navigation function — async, loads older messages if needed
@@ -575,7 +627,7 @@
     var allSaved=deletedMsgs('get');
     var saved=null;
     for(var i=0;i<allSaved.length;i++){if(allSaved[i].id===savedMsgId){saved=allSaved[i];break;}}
-    if(!saved){dbg('nav','Saved msg not found: '+savedMsgId.substring(0,30));return false;}
+    if(!saved){dbg('nav','Saved msg not found: '+String(savedMsgId).substring(0,30));return false;}
 
     var jid=extractJid(savedMsgId);
     if(!jid){dbg('nav','Bad ID');return false;}
@@ -593,23 +645,22 @@
       if(attempts>20){dbg('nav','Chat never loaded messages');return;}
       if(chat.msgs&&chat.msgs._models&&chat.msgs._models.length>0){
         dbg('nav','Chat has '+chat.msgs._models.length+' messages loaded, starting search');
-        searchAndRestore(chat,saved,0);
+        searchAndRestore(chat,saved,0,Date.now());
       } else {
-        setTimeout(function(){waitForChatReady(attempts+1);},500);
+        later(function(){waitForChatReady(attempts+1);},500);
       }
     }
-    setTimeout(function(){waitForChatReady(0);},2000);
+    later(function(){waitForChatReady(0);},2000);
     return true;
   }
 
-  function searchAndRestore(chat,saved,attempt){
+  // startTime is per search: a shared one went stale when a search ended early and starved the next one
+  function searchAndRestore(chat,saved,attempt,startTime){
     var MAX_ATTEMPTS=100;  // Up to ~5000 messages
-    var startTime=searchAndRestore._startTime||(searchAndRestore._startTime=Date.now());
     var elapsed=Date.now()-startTime;
     var MAX_TIME=120000;  // 2 minute time budget
 
     if(attempt>MAX_ATTEMPTS||elapsed>MAX_TIME){
-      searchAndRestore._startTime=null;
       dbg('nav','Gave up after '+attempt+' loads ('+Math.round(elapsed/1000)+'s, '+(chat.msgs._models?chat.msgs._models.length:0)+' msgs searched)');
       return;
     }
@@ -617,9 +668,8 @@
     // Search current messages for our target
     var found=findRevokedInChat(chat,saved);
     if(found){
-      searchAndRestore._startTime=null;
       dbg('nav','FOUND after '+attempt+' loads! ('+Math.round(elapsed/1000)+'s)');
-      applyRestore(found,saved);
+      if(found.__x_type==='revoked')applyRestore(found,saved);
       scrollToMsg(chat,found);
       fire('update');
       return;
@@ -631,21 +681,13 @@
       var loader=window.require("WAWebChatLoadMessages");
       if(loader&&loader.loadEarlierMsgs){
         var msgsBefore=chat.msgs._models?chat.msgs._models.length:0;
-        loader.loadEarlierMsgs(chat).then(function(){
+        Promise.resolve(loader.loadEarlierMsgs(chat)).then(function(){
+          if(dead)return;
           var msgsAfter=chat.msgs._models?chat.msgs._models.length:0;
-
-          if(msgsAfter===msgsBefore){
-            searchAndRestore._startTime=null;
-            dbg('nav','No more history ('+msgsAfter+' msgs). Message not found.');
-            return;
-          }
-
+          if(msgsAfter===msgsBefore){dbg('nav','No more history ('+msgsAfter+' msgs). Message not found.');return;}
           // Immediately search and load more — no delay
-          searchAndRestore(chat,saved,attempt+1);
-        }).catch(function(e){
-          dbg('nav','Load error: '+e.message);
-          searchAndRestore._startTime=null;
-        });
+          searchAndRestore(chat,saved,attempt+1,startTime);
+        }).catch(function(e){dbg('nav','Load error: '+(e&&e.message));});
         return;
       }
     }catch(e){dbg('nav','Loader error: '+e.message);}
@@ -656,120 +698,82 @@
   // Apply restore to a found message
   function applyRestore(msg,saved){
     try{
-      var header='\u{1F6AB} *This message was deleted:*\n';
-      var mediaTypes=['image','video','sticker','document','audio','ptt'];
-      if(mediaTypes.indexOf(saved.type)!==-1){
+      if(msg.__x_backupType){restoreMsg(msg);msg.__wpSavedId=saved.id;return true;}  // same session: full backup on the model
+      // Rebuild as media only while WhatsApp still has the media data; a media message without it can break rendering
+      if(MEDIA_T.indexOf(saved.type)!==-1&&msg.__x_mediaData){
         msg.__x_type=saved.type;msg.__x_body=saved.body||'';
-        msg.__x_text=header+(saved.text||'');msg.__x_caption=header+(saved.caption||'');
+        msg.__x_text=HEADER+(saved.text||'');msg.__x_caption=HEADER+(saved.caption||'');
         msg.__x_isMMS=true;msg.__x_isMedia=true;
       }else{
-        msg.__x_type='chat';
-        msg.__x_body=header+(saved.body||saved.text||'');
-        msg.__x_text=header+(saved.body||saved.text||'');
+        var body=placeholder(saved.type,saved.caption,saved.body||saved.text||'',saved.lat,saved.lng);
+        msg.__x_type='chat';msg.__x_body=HEADER+body;msg.__x_text=HEADER+body;
       }
-      msg.__x_isRevoked=false;
-      dbg('restore','Applied: '+(saved.type||'chat')+' | '+(saved.body||saved.text||'?').substring(0,30));
+      msg.__x_isRevoked=false;msg.__wpRestored=true;msg.__wpSavedId=saved.id;
+      dbg('restore','Applied: '+(saved.type||'chat')+' | '+String(saved.body||saved.text||'?').substring(0,30));
       return true;
     }catch(e){dbg('restore','Apply error: '+e.message);return false;}
   }
 
   // ── Force restore current chat ──────────────────────────
   function forceRestoreCurrentChat(callback){
-    // Find which chat is currently open
-    var currentChat=null;
-    var headerName='';
-    try{
-      var hdr=document.querySelector('[data-testid="conversation-header"] span[dir="auto"], header span.x1iyjqo2');
-      if(hdr)headerName=hdr.textContent.trim();
-    }catch(e){}
-
-    if(headerName){
-      (CC._models||[]).forEach(function(ch){
-        if(!currentChat&&(ch.__x_name===headerName||ch.__x_formattedTitle===headerName))currentChat=ch;
-      });
-    }
-    if(!currentChat){
-      // Try finding by checking which chat has focus/active
-      (CC._models||[]).forEach(function(ch){
-        if(!currentChat&&ch.__x_active)currentChat=ch;
-      });
-    }
-
-    if(!currentChat){dbg('restore','No active chat found');if(callback)callback(0);return;}
+    var done=false;
+    function finish(n){if(done)return;done=true;if(callback)try{callback(n);}catch(e){}fire('update');}
+    var currentChat=CC?activeChat():null;
+    if(!currentChat||!currentChat.id){dbg('restore','No active chat found');finish(0);return;}
     dbg('restore','Force restoring: '+(currentChat.__x_name||currentChat.__x_formattedTitle||'?'));
 
-    // Get saved messages for this chat
-    var allSaved=deletedMsgs('get');
-    var chatJid=currentChat.id._serialized;
-    var chatSaved=allSaved.filter(function(s){
-      // Match by chat JID in the saved message ID
-      return s.id&&s.id.indexOf(chatJid.split('@')[0])!==-1;
-    });
+    // Saved messages whose id belongs to this chat
+    var chatUser=currentChat.id._serialized.split('@')[0];
+    var chatSaved=deletedMsgs('get').filter(function(s){return s&&s.id&&idUser(s.id)===chatUser;});
 
-    if(!chatSaved.length){dbg('restore','No saved messages for this chat');if(callback)callback(0);return;}
+    if(!chatSaved.length){dbg('restore','No saved messages for this chat');finish(0);return;}
     dbg('restore','Found '+chatSaved.length+' saved messages for this chat');
 
     // Load ALL messages then restore
     var totalRestored=0;
+    function mark(s){if(!s.__restored){s.__restored=true;totalRestored++;}}
     function loadAndRestore(attempt){
-      if(attempt>20){
-        dbg('restore','Force restore done: '+totalRestored+' restored');
-        if(callback)callback(totalRestored);
-        return;
-      }
+      if(dead)return;
+      if(attempt>20){dbg('restore','Force restore done: '+totalRestored+' restored');finish(totalRestored);return;}
 
-      // Check current messages for revoked ones we can restore
+      // Check current messages: revoked ones we can restore, and ones the live watcher already restored
       if(currentChat.msgs&&currentChat.msgs._models){
         currentChat.msgs._models.forEach(function(m){
-          if(m.__x_type!=='revoked')return;
+          var mid=sid(m.__x_id);
+          if(m.__x_type!=='revoked'){
+            if(m.__wpRestored)chatSaved.forEach(function(s){if(s.id===m.__wpSavedId||s.id===mid)mark(s);});
+            return;
+          }
           var mTime=m.__x_t?m.__x_t*1000:0;
-          // Find matching saved message
           for(var i=0;i<chatSaved.length;i++){
             var s=chatSaved[i];
             if(s.__restored)continue;
             // Match by exact ID or time within 5 seconds
-            if(s.id===m.__x_id._serialized||(mTime&&s.time&&Math.abs(mTime-s.time)<5000)){
-              applyRestore(m,s);
-              s.__restored=true;
-              totalRestored++;
+            if(s.id===mid||(mTime&&s.time&&Math.abs(mTime-s.time)<5000)){
+              if(applyRestore(m,s))mark(s);
               break;
             }
           }
         });
       }
 
-      // Check if all saved messages are restored
-      var allDone=chatSaved.every(function(s){return s.__restored;});
-      if(allDone){
-        dbg('restore','All '+totalRestored+' messages restored!');
-        if(callback)callback(totalRestored);
-        fire('update');
-        return;
-      }
+      if(chatSaved.every(function(s){return s.__restored;})){dbg('restore','All '+totalRestored+' messages restored!');finish(totalRestored);return;}
 
       // Load more messages
       try{
         var loader=window.require("WAWebChatLoadMessages");
         if(loader&&loader.loadEarlierMsgs){
           var before=currentChat.msgs._models?currentChat.msgs._models.length:0;
-          loader.loadEarlierMsgs(currentChat).then(function(){
+          Promise.resolve(loader.loadEarlierMsgs(currentChat)).then(function(){
             var after=currentChat.msgs._models?currentChat.msgs._models.length:0;
             dbg('restore','Loaded '+(after-before)+' more (total: '+after+')');
-            if(after===before){
-              // No more messages to load
-              dbg('restore','No more history. Restored: '+totalRestored);
-              if(callback)callback(totalRestored);
-              fire('update');
-              return;
-            }
-            setTimeout(function(){loadAndRestore(attempt+1);},300);
-          }).catch(function(){
-            if(callback)callback(totalRestored);
-          });
+            if(after===before){dbg('restore','No more history. Restored: '+totalRestored);finish(totalRestored);return;}
+            later(function(){loadAndRestore(attempt+1);},300);
+          }).catch(function(){finish(totalRestored);});
           return;
         }
       }catch(e){}
-      if(callback)callback(totalRestored);
+      finish(totalRestored);
     }
 
     loadAndRestore(0);
@@ -778,7 +782,7 @@
   // ── Show media in overlay ─────────────────────────────────
   function showMedia(dataUrl, type){
     // Create fullscreen overlay
-    var overlay=document.createElement('div');
+    var overlay=document.createElement('div');overlay.className='wplus-ov';
     overlay.style.cssText='position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999999;background:rgba(0,0,0,.92);display:flex;align-items:center;justify-content:center;cursor:pointer';
     overlay.onclick=function(){overlay.remove();};
 
@@ -841,23 +845,29 @@
     (CON._models||[]).forEach(function(c){if(!c||!c.id||c.id.server!=='c.us')return;
     cs.push({p:'+'+c.id.user,n:c.__x_name||c.__x_pushname||c.__x_formattedName||'',b:c.__x_isBusiness||false});});
     if(!cs.length){alert('No contacts.');return;}
-    var csv='Phone,Name,Business\n';cs.forEach(function(c){csv+='"'+c.p+'","'+(c.n||'').replace(/"/g,'""')+'","'+(c.b?'Yes':'No')+'"\n';});
-    var a=document.createElement('a');a.href=URL.createObjectURL(new Blob(['\ufeff'+csv],{type:'text/csv'}));
+    // Names are chosen by other people: a leading = + - @ would run as a spreadsheet formula
+    function cell(v){v=String(v==null?'':v);if(/^[=+\-@\t\r]/.test(v))v="'"+v;return '"'+v.replace(/"/g,'""')+'"';}
+    var csv='Phone,Name,Business\n';cs.forEach(function(c){csv+='"'+c.p+'",'+cell(c.n)+',"'+(c.b?'Yes':'No')+'"\n';});
+    var url=URL.createObjectURL(new Blob(['\ufeff'+csv],{type:'text/csv'}));
+    var a=document.createElement('a');a.href=url;
     a.download='WPlus_Contacts_'+new Date().toISOString().slice(0,10)+'.csv';a.click();alert('Exported '+cs.length+' contacts!');
+    setTimeout(function(){try{URL.revokeObjectURL(url);}catch(e){}},10000);
   };
   window.__wplus.chatStats=function(){
-    if(!CC)return'Loading...';var ch=CC._models||[],g=0,p=0,u=0,tm=0,top=[];
-    ch.forEach(function(c){if(!c||!c.id)return;c.id.server==='g.us'?g++:p++;if(c.__x_unreadCount>0)u++;
+    if(!CC)return'Loading...';var ch=CC._models||[],g=0,p=0,o=0,u=0,tm=0,top=[];
+    // Status, broadcast lists and channels are neither personal chats nor groups
+    ch.forEach(function(c){if(!c||!c.id)return;var sv=c.id.server;if(sv==='g.us')g++;else if(sv==='c.us'||sv==='lid')p++;else o++;if(c.__x_unreadCount>0)u++;
     var mc=c.msgs&&c.msgs._models?c.msgs._models.length:0;tm+=mc;
     top.push({n:c.__x_name||c.__x_formattedTitle||c.id.user||'?',m:mc,u:c.__x_unreadCount||0,g:c.id.server==='g.us'});});
     top.sort(function(a,b){return b.m-a.m;});
     var cc=CON?(CON._models||[]).filter(function(c){return c&&c.id&&c.id.server==='c.us';}).length:0;
-    var t=ch.length+' chats ('+p+' personal, '+g+' groups)\n'+u+' unread \u00B7 '+cc+' contacts \u00B7 '+tm+' loaded msgs\n\n';
-    top.slice(0,10).forEach(function(c,i){t+=(i+1)+'. '+c.n.substring(0,22)+(c.g?' [G]':'')+' \u2014 '+c.m+(c.u>0?' ('+c.u+')':'')+'\n';});
+    var t=ch.length+' chats ('+p+' personal, '+g+' groups'+(o?', '+o+' other':'')+')\n'+u+' unread \u00B7 '+cc+' contacts \u00B7 '+tm+' loaded msgs\n\n';
+    top.slice(0,10).forEach(function(c,i){t+=(i+1)+'. '+String(c.n).substring(0,22)+(c.g?' [G]':'')+' \u2014 '+c.m+(c.u>0?' ('+c.u+')':'')+'\n';});
     return t;
   };
   window.__wplus.downloadVO=function(id){
     var list=viewOnce('get'),item=list.find(function(x){return x.id===id;});
+    if(item&&!item.data&&_memVO[id])item.data=_memVO[id];
     if(!item||!item.data){alert('Media not available yet.');return;}
     var ext='bin';if(item.mime){if(item.mime.indexOf('image')!==-1)ext='jpg';else if(item.mime.indexOf('video')!==-1)ext='mp4';else if(item.mime.indexOf('audio')!==-1||item.mime.indexOf('ogg')!==-1)ext='ogg';}
     else{if(item.type==='image')ext='jpg';else if(item.type==='video')ext='mp4';else if(item.type==='ptt')ext='ogg';}
@@ -868,18 +878,19 @@
   // ── Boot ──────────────────────────────────────────────────
   var att=0;
   function boot(){
-    if(++att>120)return;if(!init()){setTimeout(boot,1000);return;}
-    (CC._models||[]).forEach(hookChat);CC.on('add',hookChat);hooked=true;
+    if(dead||++att>120)return;if(!init()){later(boot,1000);return;}
+    (CC._models||[]).forEach(hookChat);listen(CC,'add',hookChat);
     // ── Smart Restore System ─────────────────────────────────
     // IDs change between sessions — match by sender+time or exact ID
     var restoredSet=new Set();
 
     function getSavedMsgs(){return deletedMsgs('get');}
 
-    function matchSaved(msg,chatObj){
+    function matchSaved(msg,chatObj,list){
       if(!msg||!msg.__x_id)return null;
-      var savedMsgs=getSavedMsgs();
-      var msgId=msg.__x_id._serialized||'';
+      var savedMsgs=list||getSavedMsgs();
+      var msgId=sid(msg.__x_id);
+      var okey=origKey(msg);
       var msgTime=msg.__x_t?msg.__x_t*1000:0;
       var msgChat=chatObj?chatObj.id._serialized:'';
       var msgChatUser=msgChat.split('@')[0];
@@ -892,8 +903,8 @@
 
         var score=0;
 
-        // 1. Exact ID match (same session) — perfect match
-        if(s.id===msgId){score=100;bestMatch=s;bestScore=100;break;}
+        // 1. Exact ID match — the original id (protocolMessageKey on current builds) or the same model
+        if(s.id===msgId||(okey&&s.id===okey)){score=100;bestMatch=s;bestScore=100;break;}
 
         // 2. Same chat check (required)
         var savedChatUser=(s.id||'').split('_')[1]||'';
@@ -941,7 +952,7 @@
         if(!ch.msgs||!ch.msgs._models)return;
         ch.msgs._models.forEach(function(m){
           if(m.__x_type!=='revoked')return;
-          var saved=matchSaved(m,ch);
+          var saved=matchSaved(m,ch,savedMsgs);
           if(saved&&applyRestore(m,saved)){
             restored++;
             dbg('restore','Restored: '+(saved.type||'chat')+' | '+(saved.body||saved.text||'?').substring(0,30)+' in '+(ch.__x_name||'?').substring(0,20));
@@ -952,12 +963,12 @@
     }
 
     // Watch for messages loading when user opens chats
-    function watchChat(ch){
+    function watchChat(ch){try{
       if(!ch||!ch.msgs||ch.msgs.__wpR)return;
-      ch.msgs.__wpR=true;
-      ch.msgs.on('add',function(msg){
+      listen(ch.msgs,'add',function(msg){
         try{
-          if(!msg||msg.__x_type!=='revoked')return;
+          if(!msg||msg.__x_type!=='revoked'||msg.__wpSaved)return;
+          var ok=origKey(msg);if(ok&&_pendingRev[ok])return;  // live pairing still waiting for the original
           var saved=matchSaved(msg,ch);
           if(saved){
             applyRestore(msg,saved);
@@ -965,21 +976,22 @@
           }
         }catch(e){}
       });
-    }
+      ch.msgs.__wpR=true;_cols.push(ch.msgs);
+    }catch(e){dbg('restore','watchChat failed: '+e.message);}}
     (CC._models||[]).forEach(watchChat);
-    CC.on('add',watchChat);
+    listen(CC,'add',watchChat);
 
     // Try restore once at boot (same-session messages only)
     doRestore();
-    setTimeout(doRestore,5000);
+    later(doRestore,5000);
     dbg('restore','Live watcher active — new deletions will be caught instantly');
-    var S=settings();Object.keys(S).forEach(function(k){if(S[k]){dbg('boot','Applying setting: '+k);applyToggle(k,true);}});
+    var S=settings();Object.keys(S).forEach(function(k){if(S[k]){dbg('boot','Applying setting: '+k);try{applyToggle(k,true);}catch(e){}}});
     window.__wplus.ready=true;
     dbg('boot','READY — '+((CC._models||[]).length)+' chats, '+(CON?(CON._models||[]).length:0)+' contacts');
     fire('ready');
 
     // Migrate old messages — save their media to disk files
-    setTimeout(function(){serverPost('/migrate',{});},5000);
+    later(function(){serverPost('/migrate',{});},5000);
   }
 
   // Debug API
@@ -1006,27 +1018,32 @@
   };
 
   // Full cleanup — restores WhatsApp to original state
+  window.__wplus.onCleanup=function(fn){if(typeof fn==='function')_onCleanup.push(fn);};
   window.__wplus.cleanup=function(){
+    dead=true;
     // Stop timers
     if(presInt){clearInterval(presInt);presInt=null;}
-
-    // Disconnect all MutationObservers
-    Object.keys(blurObs).forEach(function(k){try{blurObs[k].disconnect();}catch(e){}});
-    blurObs={};
+    Object.keys(_timers).forEach(function(id){clearTimeout(+id);});_timers={};
+    // Remove every collection listener and the "already hooked" markers
+    _subs.forEach(function(s){try{s[0].off(s[1],s[2]);}catch(e){}});_subs=[];_removed={};_pendingRev={};
+    _cols.forEach(function(c){try{delete c.__wp;delete c.__wpR;}catch(e){}});_cols=[];
+    // UI teardown (listeners, observers, intervals registered by ui.js)
+    _onCleanup.forEach(function(fn){try{fn();}catch(e){}});_onCleanup=[];
 
     // Remove injected CSS
     ['wplus-css-blurMessages','wplus-css-blurContacts','wplus-css-blurPhotos','wplus-css-blurAvatar','wplus-css'].forEach(function(id){var e=document.getElementById(id);if(e)e.remove();});
 
     // Restore original WhatsApp functions
-    try{var c=findExport("markComposing");if(c&&_comp){c.markComposing=_comp;if(_rec)c.markRecording=_rec;}}catch(e){}
-    try{var p=findExport("sendPresenceAvailable");if(p&&_pres)p.sendPresenceAvailable=_pres;}catch(e){}
-    try{var s=findExport("sendConversationSeen");if(s&&_seen)s.sendConversationSeen=_seen;}catch(e){}
-    try{var pl=findExport("markPlayed");if(pl&&_played)pl.markPlayed=_played;}catch(e){}
+    try{if(_mods.comp&&_comp){_mods.comp.markComposing=_comp;if(_rec)_mods.comp.markRecording=_rec;}}catch(e){}
+    try{if(_mods.pres&&_pres)_mods.pres.sendPresenceAvailable=_pres;}catch(e){}
+    try{if(_mods.seen&&_seen)_mods.seen.sendConversationSeen=_seen;}catch(e){}
+    try{if(_mods.played&&_played)_mods.played.markPlayed=_played;}catch(e){}
 
     // Remove ALL UI elements
     ['wplus-btn','wplus-panel','wplus-header-restore','wplus-css','wplus-style'].forEach(function(id){var e=document.getElementById(id);if(e)e.remove();});
-    document.querySelectorAll('.wplus-restore-btn,.wplus-b,.wpp,[id*=wplus],.wplus-msg-highlight').forEach(function(e){e.remove();});
-    document.querySelectorAll('.wplus-blur-t,.wplus-blur-p').forEach(function(e){e.classList.remove('wplus-blur-t','wplus-blur-p');});
+    document.querySelectorAll('.wplus-restore-btn,.wplus-b,.wpp,.wplus-ov,[id*=wplus]').forEach(function(e){e.remove();});
+    // These classes sit on WhatsApp's own elements — remove the class, never the element
+    document.querySelectorAll('.wplus-blur-t,.wplus-blur-p,.wplus-msg-highlight').forEach(function(e){e.classList.remove('wplus-blur-t','wplus-blur-p','wplus-msg-highlight');});
     // Clear debug timer
     if(dbg._timer){clearTimeout(dbg._timer);dbg._timer=null;}
     // Release cached media blobs
@@ -1038,6 +1055,6 @@
     console.log('[WPlus] Uninjected — WhatsApp restored to original state');
   };
 
-  setTimeout(boot,3000);
+  later(boot,3000);
   dbg('boot','Engine v'+window.__wplus.version+' loaded');
 })();

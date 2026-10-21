@@ -10,8 +10,8 @@
 #     wplus.py injects together with engine.js (X-WPlus-Token header or ?t= query).
 #   - File access is confined to the media folders inside the data directory.
 
-import json, os, re, base64, time, threading, hashlib, hmac, secrets, mimetypes
-from http.server import HTTPServer, BaseHTTPRequestHandler
+import json, os, re, base64, time, threading, hashlib, hmac, secrets, mimetypes, socket
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlsplit, unquote, parse_qs
 
 PORT = 18733
@@ -45,16 +45,33 @@ def configure(data_dir, create=True):
 configure(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data"), create=False)
 
 def load_json(path, default=None):
+    """Read a JSON list file. A missing file gives the default. A corrupt one is moved
+    aside (<name>.<time>.bad) so the next save cannot destroy it. Other read errors
+    (file locked, no permission) are raised: callers write the result back, and
+    treating them as "empty" would wipe the saved messages."""
+    if default is None:
+        default = []
     try:
         with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except (OSError, ValueError):
-        return default if default is not None else []
+            data = json.load(f)
+    except FileNotFoundError:
+        return default
+    except ValueError:
+        try: os.replace(path, f"{path}.{time.strftime('%Y%m%d_%H%M%S')}.bad")
+        except OSError: pass
+        return default
+    if isinstance(default, list):
+        if not isinstance(data, list):
+            return default
+        return [m for m in data if isinstance(m, dict)]
+    return data
 
 def save_json(path, data):
-    tmp = path + ".tmp"
+    tmp = f"{path}.{threading.get_ident()}.tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False)
+        f.flush()
+        os.fsync(f.fileno())
     os.replace(tmp, path)
 
 # ── Path safety ───────────────────────────────────────────────
@@ -181,11 +198,15 @@ def _store_media(entry):
         entry["body"] = ""
     return entry
 
+def _msg_time(m):
+    try: return float(m.get("time") or 0)
+    except (TypeError, ValueError): return 0.0
+
 def _expire_new(msgs):
     """Drop backed-up messages older than RETENTION_MS and delete their media files."""
     cutoff = time.time() * 1000 - RETENTION_MS
-    expired = [m for m in msgs if (m.get("time") or 0) < cutoff]
-    remaining = [m for m in msgs if (m.get("time") or 0) >= cutoff]
+    expired = [m for m in msgs if _msg_time(m) < cutoff]
+    remaining = [m for m in msgs if _msg_time(m) >= cutoff]
     keep = {m.get("mediaFile") for m in load_json(DEL_MSGS, []) if isinstance(m, dict)}
     files = 0
     for exp in expired:
@@ -251,6 +272,8 @@ def is_allowed_origin(origin):
     return u.scheme == "https" and (host == "whatsapp.com" or host.endswith(".whatsapp.com"))
 
 class Handler(BaseHTTPRequestHandler):
+    timeout = 60  # A client that stops sending must not hold a worker thread forever
+
     def log_message(self, *args): pass  # Silent
 
     def _host_ok(self):
@@ -349,8 +372,13 @@ class Handler(BaseHTTPRequestHandler):
             self._deny(400)
             return
 
-        path = urlsplit(self.path).path
+        try:
+            self._post(urlsplit(self.path).path, data)
+        except OSError:
+            try: self._deny(500)
+            except OSError: pass
 
+    def _post(self, path, data):
         # Save a new message (backup)
         if path == "/msg/new":
             if not data.get("id"):
@@ -407,6 +435,11 @@ class Handler(BaseHTTPRequestHandler):
                 if found is not None:
                     save_json(NEW_MSGS, remaining)
 
+            # First time this deletion is seen (media follows in a second POST) — tell the tray app
+            if existing is None and ON_DELETED is not None:
+                info = {k: entry.get(k) for k in ("id", "type", "chat", "sender")}
+                threading.Thread(target=_safe_call, args=(ON_DELETED, info), daemon=True).start()
+
             self._ok({"deleted": True, "hasMedia": bool(entry.get("mediaFile")),
                       "mediaFile": entry.get("mediaFile") or ""})
             return
@@ -459,12 +492,32 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(payload)
 
-def start_server(port=PORT, data_dir=None, token=None):
-    """Start the server in a background thread. Returns the HTTPServer."""
-    global TOKEN
+class Server(ThreadingHTTPServer):
+    daemon_threads = True
+    # SO_REUSEADDR on Windows lets a second process bind the same port and steal
+    # requests, so bind exclusively instead.
+    allow_reuse_address = os.name != "nt"
+
+    def server_bind(self):
+        if os.name == "nt" and hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
+
+ON_DELETED = None  # optional callback(info) for a newly saved deleted message
+
+def _safe_call(fn, *args):
+    try: fn(*args)
+    except Exception: pass
+
+def start_server(port=PORT, data_dir=None, token=None, on_deleted=None):
+    """Start the server in a background thread. Returns the HTTPServer
+    (server.server_address[1] is the bound port; pass port=0 for any free port).
+    Raises OSError if the port is already in use."""
+    global TOKEN, ON_DELETED
     configure(data_dir or DATA_DIR)
     TOKEN = token or secrets.token_urlsafe(32)
-    server = HTTPServer(("127.0.0.1", port), Handler)
+    ON_DELETED = on_deleted
+    server = Server(("127.0.0.1", port), Handler)
     t = threading.Thread(target=server.serve_forever, daemon=True)
     t.start()
     return server

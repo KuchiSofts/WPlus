@@ -1,6 +1,6 @@
 // WPlus UI — github.com/KuchiSofts — MIT
 (function(){
-  ['wplus-btn','wplus-panel','wplus-css'].forEach(function(id){var e=document.getElementById(id);if(e)e.remove();});
+  ['wplus-btn','wplus-panel','wplus-css','wplus-scroll-up','wplus-header-restore','wplus-preview','wplus-media-viewer'].forEach(function(id){var e=document.getElementById(id);if(e)e.remove();});
   var W=window.__wplus||{};
   function cfg(k){try{return(JSON.parse(localStorage.getItem('wplus_cfg')||'{}')||{})[k]||false;}catch(e){return false;}}
   function cfgRaw(k){try{return(JSON.parse(localStorage.getItem('wplus_cfg')||'{}')||{})[k];}catch(e){return undefined;}}
@@ -12,6 +12,9 @@
   function H(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');}
 
   function safeName(s){return String(s==null?'':s).replace(/[^0-9A-Za-z_-]/g,'').substring(0,32)||'x';}
+  // Saved entries can carry a missing/invalid time: toISOString() would throw
+  function isoDay(t){var d=new Date(t);return isNaN(d.getTime())?'unknown':d.toISOString().slice(0,10);}
+  function savedList(){try{var l=W.deletedMsgs?W.deletedMsgs('get'):JSON.parse(localStorage.getItem('wplus_del')||'[]');return Array.isArray(l)?l:[];}catch(e){return [];}}
 
   // Exact WhatsApp font stack
   var FF='"Segoe UI","Helvetica Neue",Helvetica,"Lucida Grande",Arial,Ubuntu,Cantarell,"Fira Sans",sans-serif';
@@ -163,6 +166,8 @@
     '<div class="wpp-sec">Settings</div>'+
     T('checkUpdates',I.ch,'Check for updates','Asks api.github.com for new releases',cfgRaw('checkUpdates')!==false)+
     '<div class="wpp-div"></div>'+
+    T('notifyDeleted',I.ch,'Notify on deleted messages','Windows notification with the chat name only — never the content',cfgRaw('notifyDeleted')!==false)+
+    '<div class="wpp-div"></div>'+
     T('debugEnabled',I.ch,'Debug logging','Off by default — log may contain message previews',cfg('debugEnabled')===true)+
     '<div class="wpp-div"></div>'+
     R('debug-status',I.ch,'System status','Engine, hooks, storage info','')+
@@ -198,38 +203,39 @@
 
   btn.onclick=function(e){e.stopPropagation();var isOpen=P.classList.contains('open');isOpen?close():open();uiLog(isOpen?'Panel CLOSED':'Panel OPENED');};
   document.getElementById('wp-x').onclick=function(){close();uiLog('Panel closed (back)');};
-  document.addEventListener('click',function(e){
+  function onDocClick(e){
     if(!P.classList.contains('open'))return;
     if(P.contains(e.target)||btn.contains(e.target))return;
     var preview=document.getElementById('wplus-preview');
     if(preview&&preview.contains(e.target))return;
     close();
-  });
+  }
+  document.addEventListener('click',onDocClick);
   window.addEventListener('wplus-update',refresh);
 
-  P.querySelectorAll('.wpp-tg').forEach(function(el){el.onclick=function(e){e.stopPropagation();var id=this.dataset.t,on=!this.classList.contains('on');this.classList.toggle('on');setCfg(id,on);if(W.applyToggle)W.applyToggle(id,on);localStorage.setItem('wplus_sync_now','1');uiLog('Toggle: '+id+' → '+(on?'ON':'OFF'));};});
+  P.querySelectorAll('.wpp-tg').forEach(function(el){el.onclick=function(e){e.stopPropagation();var id=this.dataset.t,on=!this.classList.contains('on');this.classList.toggle('on');setCfg(id,on);if(W.applyToggle)W.applyToggle(id,on);try{localStorage.setItem('wplus_sync_now','1');}catch(x){}uiLog('Toggle: '+id+' → '+(on?'ON':'OFF'));};});
 
   P.querySelector('[data-a="del"]').onclick=function(){var el=document.getElementById('wp-dl');if(el.classList.contains('open')){el.classList.remove('open');return;}closeAll();refresh();
-    var msgs=W.deletedMsgs?W.deletedMsgs('get'):JSON.parse(localStorage.getItem('wplus_del')||'[]');
+    var msgs=savedList();
     if(!msgs.length){el.innerHTML='<div class="wpp-dme">No deleted messages yet</div>';el.classList.add('open');return;}
-    var h='';msgs.slice().reverse().forEach(function(m,idx){
+    var h='';msgs.slice().reverse().forEach(function(m){
+      if(!m)return;
       var t=new Date(m.time).toLocaleString();
       var s=m.sender?(m.sender+'').split('@')[0]:'?';
-      var hasBlob=!!m.media;
       var typeIcon={image:'\u{1F4F7}',video:'\u{1F3AC}',ptt:'\u{1F3A4}',audio:'\u{1F3B5}',sticker:'\u{1F3A8}',vcard:'\u{1F464}',location:'\u{1F4CD}'}[m.type]||'\u{1F4AC}';
 
       // Compact body preview — detect base64 and show type instead
-      var rawBody=m.body||m.text||'';
+      var rawBody=String(m.body||m.text||'');
       var body='';
       var isBase64=rawBody.length>100&&(rawBody.indexOf('/9j/')===0||rawBody.indexOf('data:')===0||rawBody.indexOf('AAAA')===0||/^[A-Za-z0-9+/=]{50,}/.test(rawBody));
       if(isBase64||['image','video','ptt','audio','sticker','document'].indexOf(m.type)!==-1){
-        var tn=String(m.type||'media');body=typeIcon+' '+(tn==='ptt'?'Voice message':tn.charAt(0).toUpperCase()+tn.slice(1))+(m.caption?' — '+m.caption.substring(0,40):'');
+        var tn=String(m.type||'media');body=typeIcon+' '+(tn==='ptt'?'Voice message':tn.charAt(0).toUpperCase()+tn.slice(1))+(m.caption?' — '+String(m.caption).substring(0,40):'');
       } else {
         body=rawBody.substring(0,80);
       }
       if(!body)body='(empty)';
 
-      h+='<div class="wpp-dm" style="cursor:pointer;display:flex;align-items:center;gap:10px;padding:8px 20px 8px 36px" data-idx="'+idx+'">';
+      h+='<div class="wpp-dm" style="cursor:pointer;display:flex;align-items:center;gap:10px;padding:8px 20px 8px 36px" data-id="'+H(m.id)+'">';
       h+='<span style="font-size:18px;width:24px;text-align:center;flex-shrink:0">'+typeIcon+'</span>';
       h+='<div style="flex:1;min-width:0"><div style="display:flex;justify-content:space-between"><span class="wpp-dms" style="font-size:12px">+'+H(s)+'</span><span class="wpp-dmt">'+t+'</span></div>';
       h+='<div style="font-size:13px;color:#d1d7db;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">'+H(body)+'</div></div>';
@@ -239,23 +245,23 @@
     el.innerHTML=h;
 
     // Click row: media → fullscreen viewer, text → preview popup
-    el.querySelectorAll('[data-idx]').forEach(function(row){
+    // Rows are looked up by id: a position index pointed at another message once a new one was saved
+    el.querySelectorAll('.wpp-dm[data-id]').forEach(function(row){
       row.onclick=function(e){
         if(e.target.dataset.nav)return;
-        var idx=parseInt(this.dataset.idx);
-        var allMsgs=W.deletedMsgs?W.deletedMsgs('get'):JSON.parse(localStorage.getItem('wplus_del')||'[]');
-        var m=allMsgs.slice().reverse()[idx];
+        var id=this.dataset.id;
+        var m=savedList().find(function(x){return x&&x.id===id;});
         if(!m)return;
 
         // Log and open preview
-        uiLog('Saved msg clicked',{idx:idx,id:(m.id||'?').substring(0,40),type:m.type,sender:(m.sender||'?').split('@')[0],chat:m.chat||'?',time:m.time?new Date(m.time).toLocaleString():'?',bodyLen:(m.body||'').length,hasMedia:!!(m.media||m.mediaFile),mediaFile:m.mediaFile||''});
+        uiLog('Saved msg clicked',{id:(m.id||'?').substring(0,40),type:m.type,sender:(m.sender||'?').split('@')[0],chat:m.chat||'?',time:m.time?new Date(m.time).toLocaleString():'?',bodyLen:(m.body||'').length,hasMedia:!!(m.media||m.mediaFile),mediaFile:m.mediaFile||''});
         showPreview(m);
       };
     });
 
     // Go to chat arrow
-    el.querySelectorAll('[data-nav]').forEach(function(btn){
-      btn.onclick=function(e){
+    el.querySelectorAll('[data-nav]').forEach(function(nb){
+      nb.onclick=function(e){
         e.stopPropagation();
         var id=this.dataset.nav;
         uiLog('Go to chat clicked',{id:id.substring(0,50)});
@@ -334,7 +340,6 @@
 
   // Debug toggle controls engine logging
   // Already handled by the generic toggle handler — just wire it up
-  var origToggleHandler=null;
   P.querySelectorAll('.wpp-tg').forEach(function(el){
     if(el.dataset.t==='debugEnabled'){
       el.onclick=function(e){
@@ -364,9 +369,6 @@
     var time=new Date(m.time).toLocaleString();
 
     uiLog('Preview opened',{type:m.type,sender:sender,time:time,id:(m.id||'?').substring(0,40),hasMedia:!!(m.media||m.mediaFile),bodyLen:(m.body||'').length,chat:m.chat||'?'});
-    var hasMedia=!!m.media;
-    var typeIcon={image:'\u{1F4F7}',video:'\u{1F3AC}',ptt:'\u{1F3A4}',audio:'\u{1F3B5}',sticker:'\u{1F3A8}'}[m.type]||'';
-
     var overlay=document.createElement('div');
     overlay.id='wplus-preview';
     overlay.style.cssText='position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999999;background:rgba(0,0,0,.7);display:flex;align-items:center;justify-content:center;font-family:Segoe UI,sans-serif';
@@ -391,7 +393,7 @@
 
     // Resolve media source: file server > data URL > base64 body > thumbnail
     var mediaUrl=null;
-    var rawBody=m.body||m.text||'';
+    var rawBody=String(m.body||m.text||'');
     var isBase64=rawBody.length>100&&(/^\/9j\/|^data:|^AAAA|^UklG|^iVBOR|^T2dn|^GkXE/i.test(rawBody));
     var isMediaType=['image','video','ptt','audio','sticker','document'].indexOf(m.type)!==-1;
     var mimeMap={image:'image/jpeg',video:'video/mp4',ptt:'audio/ogg',audio:'audio/mpeg',sticker:'image/webp'};
@@ -401,7 +403,7 @@
       mediaUrl=W.mediaUrl(m.mediaFile);
     }
     // Priority 2: data/blob URL in media field
-    else if(m.media&&(m.media.length>50||m.media.indexOf('blob:')===0)){
+    else if(typeof m.media==='string'&&(m.media.length>50||m.media.indexOf('blob:')===0)){
       mediaUrl=m.media;
     }
     // Priority 3: base64 in body (for images this is the actual image, for video it's just a thumbnail)
@@ -439,7 +441,7 @@
 
     // Caption
     if(m.caption&&hasMedia){
-      body+='<div style="color:#d1d7db;font-size:13px;line-height:1.3;margin:4px 0">'+H(m.caption.substring(0,300))+'</div>';
+      body+='<div style="color:#d1d7db;font-size:13px;line-height:1.3;margin:4px 0">'+H(String(m.caption).substring(0,300))+'</div>';
     }
 
     // Text — only for actual text messages
@@ -447,7 +449,7 @@
       body+='<div style="color:#e9edef;font-size:14px;line-height:1.4;word-break:break-word;margin:4px 0">'+H(rawBody.substring(0,2000))+'</div>';
     }
     if(m.caption){
-      body+='<div style="color:#8696a0;font-size:12px;margin-top:2px">'+H(m.caption.substring(0,500))+'</div>';
+      body+='<div style="color:#8696a0;font-size:12px;margin-top:2px">'+H(String(m.caption).substring(0,500))+'</div>';
     }
 
     // Time + type badge
@@ -493,13 +495,15 @@
       dlBtn.onclick=function(){
         var ext={image:'jpg',video:'mp4',ptt:'ogg',audio:'mp3',sticker:'webp'}[m.type]||'bin';
         var a=document.createElement('a');a.href=mediaUrl;
-        a.download='WPlus_'+safeName(m.type)+'_'+safeName(sender)+'_'+new Date(m.time).toISOString().slice(0,10)+'.'+ext;
+        a.download='WPlus_'+safeName(m.type)+'_'+safeName(sender)+'_'+isoDay(m.time)+'.'+ext;
         a.click();
       };
     }
   }
 
   // ── Fullscreen Media Viewer (image zoom + video player) ──
+  var _esc=null;
+  function closeViewer(){var v=document.getElementById('wplus-media-viewer');if(v)v.remove();if(_esc){document.removeEventListener('keydown',_esc);_esc=null;}}
   function openMediaViewer(dataUrl,type,sender,time){
     uiLog('Media viewer opened',{type:type,sender:sender,srcLen:dataUrl?dataUrl.length:0,isBlob:dataUrl?dataUrl.indexOf('blob:')===0:false,isData:dataUrl?dataUrl.indexOf('data:')===0:false,isHttp:dataUrl?dataUrl.indexOf('http')===0:false});
     var oldViewer=document.getElementById('wplus-media-viewer');
@@ -522,7 +526,7 @@
       e.stopPropagation();
       var ext={image:'jpg',video:'mp4',ptt:'ogg',audio:'mp3',sticker:'webp'}[type]||'bin';
       var a=document.createElement('a');a.href=dataUrl;
-      a.download='WPlus_'+safeName(type)+'_'+safeName(sender||'media')+'_'+new Date(time).toISOString().slice(0,10)+'.'+ext;
+      a.download='WPlus_'+safeName(type)+'_'+safeName(sender||'media')+'_'+isoDay(time)+'.'+ext;
       a.click();
     };
     topBar.appendChild(dlDiv);
@@ -533,7 +537,7 @@
     closeBtn.textContent='\u{2715}';
     closeBtn.onmouseenter=function(){this.style.background='rgba(255,255,255,.1)';};
     closeBtn.onmouseleave=function(){this.style.background='transparent';};
-    closeBtn.onclick=function(){viewer.remove();};
+    closeBtn.onclick=closeViewer;
     topBar.appendChild(closeBtn);
     viewer.appendChild(topBar);
 
@@ -628,12 +632,11 @@
 
     viewer.appendChild(container);
 
-    // Click background to close (not on media)
-    viewer.onclick=function(e){if(e.target===viewer||e.target===container)viewer.remove();};
-
-    // Escape key to close
-    var escHandler=function(e){if(e.key==='Escape'){viewer.remove();document.removeEventListener('keydown',escHandler);}};
-    document.addEventListener('keydown',escHandler);
+    // Click background / close button / Escape all go through closeViewer, which drops the key listener
+    viewer.onclick=function(e){if(e.target===viewer||e.target===container)closeViewer();};
+    if(_esc)document.removeEventListener('keydown',_esc);
+    _esc=function(e){if(e.key==='Escape')closeViewer();};
+    document.addEventListener('keydown',_esc);
 
     document.body.appendChild(viewer);
   }
@@ -653,7 +656,8 @@
         var latest=(data.tag_name||'').replace(/^v/,'');
         if(!latest)return;
         if(newerVersion(latest,W.version||'0')){
-          updateUrl=data.html_url||'https://github.com/KuchiSofts/WPlus/releases/latest';
+          // Only ever open a GitHub page from this answer
+          updateUrl=/^https:\/\/github\.com\//.test(data.html_url||'')?data.html_url:'https://github.com/KuchiSofts/WPlus/releases/latest';
           // Show update bar
           var bar=document.getElementById('wplus-update-bar');
           if(bar){bar.style.display='block';document.getElementById('wplus-update-text').textContent='Update v'+latest+' available — tap to download';}
@@ -680,13 +684,13 @@
   }
 
   // Check after 15 seconds
-  setTimeout(checkForUpdate,15000);
+  var updT=setTimeout(checkForUpdate,15000);
 
   // ── Sidebar icon positioning ───────────────────────────
   function pos(){var mb=null;document.querySelectorAll('button,[role=button]').forEach(function(e){if(e.getBoundingClientRect().left<60&&(e.title==='Media'||e.ariaLabel==='Media'))mb=e;});
     if(mb){var r=mb.getBoundingClientRect();btn.style.top=(r.top-48)+'px';btn.style.left=Math.round(r.left)+'px';}
-    else{var a=[];document.querySelectorAll('button,[role=button]').forEach(function(e){var r=e.getBoundingClientRect();if(r.left<60&&r.width>20&&r.width<55&&r.height>20)a.push({y:r.top,x:r.left});});a.sort(function(a,b){return a.y-b.y;});if(a.length>=3){var t=a[a.length-3];btn.style.top=(t.y-48)+'px';btn.style.left=Math.round(t.x)+'px';}}}
-  pos();window.addEventListener('resize',pos);setInterval(pos,10000); // Check every 10s instead of 3s
+    else{var a=[];document.querySelectorAll('button,[role=button]').forEach(function(e){var br=e.getBoundingClientRect();if(br.left<60&&br.width>20&&br.width<55&&br.height>20)a.push({y:br.top,x:br.left});});a.sort(function(p,q){return p.y-q.y;});if(a.length>=3){var t=a[a.length-3];btn.style.top=(t.y-48)+'px';btn.style.left=Math.round(t.x)+'px';}}}
+  pos();window.addEventListener('resize',pos);var posInt=setInterval(pos,10000); // Check every 10s instead of 3s
 
   // ── Chat header restore button ────────────────────────
   var restoreSvg='<svg viewBox="0 0 24 24"><path d="M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4zm-1 16v-2h2v2h-2zm0-4V7h2v6h-2z"/></svg>';
@@ -755,10 +759,11 @@
 
   // Watch for chat changes — inject header button + position scroll-up
   var _injDebounce=null;
-  new MutationObserver(function(){
+  var mo=new MutationObserver(function(){
     if(_injDebounce)clearTimeout(_injDebounce);
-    _injDebounce=setTimeout(function(){injectRestoreBtn();checkScrollUp();},500);
-  }).observe(document.getElementById('app')||document.body,{childList:true,subtree:true});
+    _injDebounce=setTimeout(function(){_injDebounce=null;injectRestoreBtn();checkScrollUp();},500);
+  });
+  mo.observe(document.getElementById('app')||document.body,{childList:true,subtree:true});
   injectRestoreBtn();
 
   // ── Scroll Up / Load Older Messages button ────────────
@@ -781,8 +786,11 @@
       var CC=window.require("WAWebChatCollection").ChatCollection;
       var chat=null;
 
+      // Method 0: WhatsApp's own notion of the open chat
+      try{if(CC.getActive)chat=CC.getActive()||null;}catch(x){}
+
       // Method 1: Find by header name
-      var headers=document.querySelectorAll('header');
+      var headers=chat?[]:document.querySelectorAll('header');
       headers.forEach(function(h){
         var r=h.getBoundingClientRect();
         if(r.x>400&&r.width>200){
@@ -803,7 +811,7 @@
       var loader=window.require("WAWebChatLoadMessages");
       var before=chat.msgs&&chat.msgs._models?chat.msgs._models.length:0;
 
-      loader.loadEarlierMsgs(chat).then(function(){
+      Promise.resolve(loader.loadEarlierMsgs(chat)).then(function(){
         var after=chat.msgs&&chat.msgs._models?chat.msgs._models.length:0;
         var loaded=after-before;
         _loadingOlder=false;
@@ -849,6 +857,13 @@
     scrollUpBtn.style.display=hasChat?'flex':'none';
   }
   checkScrollUp();
+
+  // Engine cleanup() calls this: drop every listener, observer and timer the UI added
+  if(W.onCleanup)W.onCleanup(function(){
+    document.removeEventListener('click',onDocClick);window.removeEventListener('wplus-update',refresh);window.removeEventListener('resize',pos);
+    clearInterval(posInt);clearTimeout(updT);if(_injDebounce)clearTimeout(_injDebounce);mo.disconnect();closeViewer();
+    [btn,P,scrollUpBtn,css].forEach(function(e){if(e&&e.parentNode)e.parentNode.removeChild(e);});
+  });
 
   return'ok';
 })();
