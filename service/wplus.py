@@ -230,7 +230,8 @@ FILES = {
 LOG_FILE = os.path.join(DATA_DIR, "debug.log")
 STATUS_FILE = os.path.join(DATA_DIR, "status.txt")
 
-state = {"status": "Starting...", "injected": False, "syncs": 0, "running": True, "ws_url": None, "bridge": None}
+state = {"status": "Starting...", "injected": False, "syncs": 0, "running": True, "ws_url": None, "bridge": None,
+         "icon": None}
 
 def ensure_bridge(ws_url):
     """Keep one live CDP bridge session to the WhatsApp page."""
@@ -250,21 +251,32 @@ def stop_bridge():
     if b: b.stop()
 
 def log(msg):
+    changed = state["status"] != msg
     state["status"] = msg
     try:
         with open(STATUS_FILE, "a", encoding="utf-8") as f:
             f.write(f"[{time.strftime('%H:%M:%S')}] {msg}\n")
-    except: pass
+    except OSError: pass
+    # pystray builds the menu once; rebuild it so "Status:" shows the current state
+    icon = state["icon"]
+    if changed and icon is not None:
+        try: icon.update_menu()
+        except Exception: pass
 
 def load_file(path, default="[]"):
     try:
         with open(path, "r", encoding="utf-8") as f: return f.read()
-    except: return default
+    except (OSError, ValueError): return default
 
 def save_file(path, data):
+    """Write through a temp file so a crash or a concurrent reader never sees half a file."""
+    tmp = f"{path}.{threading.get_ident()}.tmp"
     try:
-        with open(path, "w", encoding="utf-8") as f: f.write(data)
-    except: pass
+        with open(tmp, "w", encoding="utf-8") as f: f.write(data)
+        os.replace(tmp, path)
+    except OSError:
+        try: os.remove(tmp)
+        except OSError: pass
 
 def get_wa_target():
     try:
@@ -273,8 +285,11 @@ def get_wa_target():
         targets = json.loads(c.getresponse().read())
         c.close()
         for t in targets:
-            if "whatsapp" in t.get("url", "") and t["type"] == "page": return t
-    except: pass
+            # No webSocketDebuggerUrl means another DevTools client owns the page
+            if ("whatsapp" in t.get("url", "") and t.get("type") == "page"
+                    and t.get("webSocketDebuggerUrl")):
+                return t
+    except (OSError, ValueError, http.client.HTTPException, AttributeError, TypeError): pass
     return None
 
 def cdp_eval(ws_url, code, timeout=60):
@@ -367,7 +382,10 @@ def sync_key(ws_url, key, path):
         # into it (keeps mediaFile, moves any base64 media to disk) instead of overwriting
         try: entries = json.loads(val)
         except ValueError: return 0
-        return 1 if fileserver.merge_deleted(entries) else 0
+        try: return 1 if fileserver.merge_deleted(entries) else 0
+        except OSError as e:  # File locked/unreadable: keep it, retry on the next sync
+            log(f"Could not save deleted messages: {e}")
+            return 0
     if val != load_file(path, ""):
         save_file(path, val)
         return 1
@@ -497,13 +515,9 @@ def in_background(fn):
     return wrapper
 
 def on_quit(icon, item):
+    # The service thread does the final sync + uninject when it sees running=False
+    # (doing it here raced with that thread, which could re-inject right after).
     log("Shutting down...")
-    if state["ws_url"]:
-        try: sync(state["ws_url"])
-        except: pass
-        try: uninject(state["ws_url"])
-        except: pass
-    stop_bridge()
     state["running"] = False
     icon.stop()
 
@@ -570,8 +584,10 @@ def create_tray():
 
 # ── Service Loop ─────────────────────────────────────────────
 def service_loop():
-    with open(STATUS_FILE, "w", encoding="utf-8") as f:
-        f.write(f"WPlus Service started {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+    try:
+        with open(STATUS_FILE, "w", encoding="utf-8") as f:
+            f.write(f"WPlus Service started {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+    except OSError: pass
 
     try:
         start_file_server(FILE_SERVER_PORT)
@@ -634,6 +650,7 @@ def service_loop():
     while state["running"]:
         try:
             time.sleep(3)
+            if not state["running"]: break
             sync_tick += 1
 
             # ── Detect WhatsApp lifecycle ─────────────────
@@ -643,9 +660,10 @@ def service_loop():
                 if state["injected"]:
                     log("WhatsApp closed — saving data")
                     try: sync(state["ws_url"])
-                    except: pass
+                    except Exception: pass
                     state["injected"] = False
                     state["ws_url"] = None
+                    stop_bridge()
                 continue
 
             if change == "started":
@@ -692,13 +710,15 @@ def service_loop():
                     state["syncs"] += changes
 
         except KeyboardInterrupt: break
-        except: time.sleep(5)
+        except Exception as e:
+            log(f"Error: {type(e).__name__}: {e}"[:200])
+            time.sleep(5)
 
     if state["ws_url"]:
         try: sync(state["ws_url"])
-        except: pass
+        except Exception: pass
         try: uninject(state["ws_url"])
-        except: pass
+        except Exception: pass
     stop_bridge()
     log("Service stopped")
 
@@ -774,11 +794,13 @@ def main():
         log(f"Replaced {killed} old instance(s)")
 
     icon = create_tray()
+    state["icon"] = icon
     t = threading.Thread(target=service_loop, daemon=True)
     t.start()
     icon.run()
+    state["icon"] = None
     state["running"] = False
-    t.join(timeout=10)
+    t.join(timeout=30)  # Final sync + uninject
 
 if __name__ == "__main__":
     main()
