@@ -40,7 +40,8 @@ assessing its security:
     with the scripts;
   - reads and deletes files only inside the `data/` media folders.
 - **Data at rest.** Saved messages and media are stored unencrypted in the
-  `data/` folder next to `WPlus.exe`. Anyone with access to your Windows
+  `data/` folder next to `WPlus.exe` (or `%LOCALAPPDATA%\WPlus\data` when that
+  folder is not writable). Anyone with access to your Windows
   account can read them. See [Data & privacy](README.md#data--privacy).
 - **Network.** The only outbound request WPlus makes on its own is the update
   check to `api.github.com` (can be turned off in the panel).

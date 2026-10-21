@@ -26,7 +26,24 @@ else:
     EXE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     BUNDLE_DIR = EXE_DIR
 
-DATA_DIR = os.path.join(EXE_DIR, "data")
+def _dir_writable(d):
+    """True if files can be created in d (created if missing). os.access() ignores
+    NTFS permissions, so actually try it."""
+    try:
+        os.makedirs(d, exist_ok=True)
+        probe = os.path.join(d, f".wplus-write-test-{os.getpid()}.tmp")
+        with open(probe, "w"): pass
+        os.remove(probe)
+        return True
+    except OSError:
+        return False
+
+# data/ (and the extracted JS) live next to the exe. If that folder is read-only
+# (e.g. the exe was put in Program Files), use %LOCALAPPDATA%\WPlus instead.
+APP_DIR = EXE_DIR
+if not _dir_writable(os.path.join(EXE_DIR, "data")):
+    APP_DIR = os.path.join(os.environ.get("LOCALAPPDATA") or os.path.expanduser("~"), "WPlus")
+DATA_DIR = os.path.join(APP_DIR, "data")
 # Bundled assets live in _MEIPASS when frozen (--add-data "assets/icon-64.png;assets")
 ASSETS_DIR = next((d for d in (os.path.join(BUNDLE_DIR, "assets"), os.path.join(EXE_DIR, "assets"))
                    if os.path.isdir(d)), os.path.join(BUNDLE_DIR, "assets"))
@@ -136,7 +153,7 @@ def ensure_debug_port():
 def setup():
     """Create folders, extract files, configure registry"""
     for d in ["data", "data/Images", "data/Videos", "data/Sounds", "data/Docs"]:
-        os.makedirs(os.path.join(EXE_DIR, d), exist_ok=True)
+        os.makedirs(os.path.join(APP_DIR, d), exist_ok=True)
 
     # Enable debug port on first run
     first_run = ensure_debug_port()
@@ -152,11 +169,11 @@ def setup():
                 "WPlus — First Time Setup", 0x40)
         except: pass
 
-    # Extract bundled JS files to exe directory (if not already there or outdated)
+    # Extract bundled JS files next to data/ (if not already there or outdated)
     for filename in ["engine.js", "ui.js"]:
         src = os.path.join(BUNDLE_DIR, filename)
-        dst = os.path.join(EXE_DIR, filename)
-        if os.path.exists(src):
+        dst = os.path.join(APP_DIR, filename)
+        if os.path.exists(src) and os.path.normcase(os.path.abspath(src)) != os.path.normcase(os.path.abspath(dst)):
             # Always overwrite with bundled version (ensures updates)
             try:
                 with open(src, "r", encoding="utf-8") as f: content = f.read()
@@ -297,6 +314,14 @@ def detect_wa_change():
     else:
         return "stopped"
 
+def read_js(filename):
+    """The extracted copy (users may edit it), else the bundled one."""
+    for d in (APP_DIR, BUNDLE_DIR):
+        try:
+            with open(os.path.join(d, filename), "r", encoding="utf-8") as f: return f.read()
+        except OSError: continue
+    raise FileNotFoundError(filename)
+
 def inject(ws_url):
     cdp_eval(ws_url, 'if(window.__wplus&&window.__wplus.cleanup)window.__wplus.cleanup()')
     # Pull anything the page saved since the last sync before overwriting it with the file copy
@@ -308,10 +333,7 @@ def inject(ws_url):
         if data and data != "null":
             cdp_eval(ws_url, f'localStorage.setItem("{key}",{json.dumps(data)})')
             restored += 1
-    engine_path = os.path.join(EXE_DIR, "engine.js")
-    ui_path = os.path.join(EXE_DIR, "ui.js")
-    with open(engine_path, "r", encoding="utf-8") as f: engine = f.read()
-    with open(ui_path, "r", encoding="utf-8") as f: ui = f.read()
+    engine, ui = read_js("engine.js"), read_js("ui.js")
     token = f"window.__WPLUS_TOKEN__={json.dumps(SERVER_TOKEN)};\n"
     result = cdp_eval(ws_url, token + engine + ";\n" + ui)
     return result == "ok", restored
