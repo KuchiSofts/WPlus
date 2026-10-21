@@ -251,9 +251,38 @@
         var body=placeholder(msg.__x_backupType,msg.__x_backupCaption,msg.__x_backupBody||msg.__x_backupText||'',msg.__x_backupLat,msg.__x_backupLng);
         msg.__x_type='chat';msg.__x_body=HEADER+body;msg.__x_text=HEADER+body;
       }
-      msg.__x_isRevoked=false;msg.__wpRestored=true;
+      msg.__x_isRevoked=false;msg.__wpRestored=true;markDeleted(msg);
       dbg('restore','Msg restored: '+(msg.__x_backupType||'chat')+' | '+String(msg.__x_backupBody||'').substring(0,30));
     }catch(e){dbg('restore','Error: '+e.message);}
+  }
+
+  // ── "Deleted" badge on restored bubbles ──────────────────
+  // Rows carry the short message id (id.id) in data-id; restored ones get a red ring + "Deleted" badge.
+  var _delIds=new Set(),_delObs=null,_delTimer=null;
+  var DEL_CSS='.wplus-del{box-shadow:0 0 0 2px rgba(239,68,68,.85)!important;border-radius:8px}'+
+    '.wplus-del::after{content:"\u{1F6AB} Deleted";position:absolute;top:-9px;right:10px;z-index:3;background:#ef4444;color:#fff;'+
+    'font:600 10px/16px system-ui,-apple-system,"Segoe UI",sans-serif;padding:0 7px;border-radius:8px;pointer-events:none;'+
+    'box-shadow:0 1px 2px rgba(0,0,0,.35);white-space:nowrap}';
+  function markDeleted(msg){
+    try{
+      var k=msg&&msg.__x_id,i=k&&k.id;if(!i||dead)return;
+      _delIds.add(String(i));
+      if(!document.getElementById('wplus-del-style')){var st=document.createElement('style');st.id='wplus-del-style';st.textContent=DEL_CSS;document.head.appendChild(st);}
+      if(!_delObs&&window.MutationObserver){
+        var app=document.getElementById('app')||document.body;
+        _delObs=new MutationObserver(scheduleDelPaint);_delObs.observe(app,{childList:true,subtree:true});
+      }
+      scheduleDelPaint();
+    }catch(e){}
+  }
+  function scheduleDelPaint(){if(_delTimer||dead||!_delIds.size)return;_delTimer=later(function(){_delTimer=null;paintDeleted();},150);}
+  function paintDeleted(){
+    var main=document.getElementById('main');if(!main)return;
+    main.querySelectorAll('[data-id]').forEach(function(r){
+      if(!_delIds.has(r.getAttribute('data-id')))return;
+      var c=r.querySelector('[data-testid="msg-container"]')||r;
+      if(!c.classList.contains('wplus-del'))c.classList.add('wplus-del');
+    });
   }
 
   // Keep a copy of an incoming message on the model itself (for every loaded message, not only new ones,
@@ -735,7 +764,7 @@
         var body=placeholder(saved.type,saved.caption,saved.body||saved.text||'',saved.lat,saved.lng);
         msg.__x_type='chat';msg.__x_body=HEADER+body;msg.__x_text=HEADER+body;
       }
-      msg.__x_isRevoked=false;msg.__wpRestored=true;msg.__wpSavedId=saved.id;
+      msg.__x_isRevoked=false;msg.__wpRestored=true;msg.__wpSavedId=saved.id;markDeleted(msg);
       dbg('restore','Applied: '+(saved.type||'chat')+' | '+String(saved.body||saved.text||'?').substring(0,30));
       return true;
     }catch(e){dbg('restore','Apply error: '+e.message);return false;}
@@ -1051,6 +1080,9 @@
     // Stop timers
     if(presInt){clearInterval(presInt);presInt=null;}
     Object.keys(_timers).forEach(function(id){clearTimeout(+id);});_timers={};
+    try{if(_delObs)_delObs.disconnect();}catch(e){}_delObs=null;_delTimer=null;_delIds.clear();
+    document.querySelectorAll('.wplus-del').forEach(function(e){e.classList.remove('wplus-del');});
+    var dst=document.getElementById('wplus-del-style');if(dst)dst.remove();
     // Remove every collection listener and the "already hooked" markers
     _subs.forEach(function(s){try{s[0].off(s[1],s[2]);}catch(e){}});_subs=[];_removed={};_pendingRev={};
     _cols.forEach(function(c){try{delete c.__wp;delete c.__wpR;}catch(e){}});_cols=[];
