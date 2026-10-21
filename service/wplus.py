@@ -11,7 +11,7 @@ Single exe that contains everything:
 
 On first run, creates data/ folder structure.
 """
-import sys, os, json, http.client, time, subprocess, threading, ssl, secrets
+import sys, os, re, json, http.client, time, subprocess, threading, ssl, secrets
 
 CURRENT_VERSION = "2.0.1"  # Keep in sync with engine.js and package.json
 GITHUB_REPO = "KuchiSofts/WPlus"
@@ -438,7 +438,6 @@ def latest_release_for_page():
 def ver_tuple(v):
     """'v2.0.10' -> (2, 0, 10). Pre-release/build suffixes ('-beta', '+x') are ignored
     and trailing zeros dropped, so '2.1' == '2.1.0'. Returns () if there is no number."""
-    import re
     m = re.match(r"\s*[vV]?(\d+(?:\.\d+)*)", str(v or ""))
     if not m:
         return ()
@@ -736,18 +735,39 @@ def is_startup_enabled():
     except:
         return False
 
+def startup_command():
+    if getattr(sys, 'frozen', False):
+        return f'"{sys.executable}"'
+    # Source mode: run the script with pythonw so no console window opens
+    pyw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
+    return f'"{pyw if os.path.exists(pyw) else sys.executable}" "{os.path.abspath(__file__)}"'
+
+def get_startup_value():
+    import winreg
+    try:
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, STARTUP_KEY, 0, winreg.KEY_READ)
+        try: return winreg.QueryValueEx(key, STARTUP_NAME)[0]
+        finally: winreg.CloseKey(key)
+    except OSError:
+        return None
+
+def startup_value_stale(value):
+    """True if a Run entry points at files that no longer exist (WPlus was moved)."""
+    paths = re.findall(r'"([^"]+)"', str(value or ""))
+    return bool(paths) and not all(os.path.exists(x) for x in paths)
+
+def refresh_startup_entry():
+    """Re-point an enabled Run entry at this copy if the old path is gone."""
+    value = get_startup_value()
+    if value and startup_value_stale(value) and value != startup_command():
+        set_startup(True)
+
 def set_startup(enable):
     import winreg
     try:
         key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, STARTUP_KEY, 0, winreg.KEY_WRITE)
         if enable:
-            if getattr(sys, 'frozen', False):
-                cmd = f'"{sys.executable}"'
-            else:
-                # Source mode: run the script with pythonw so no console window opens
-                pyw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
-                cmd = f'"{pyw if os.path.exists(pyw) else sys.executable}" "{os.path.abspath(__file__)}"'
-            winreg.SetValueEx(key, STARTUP_NAME, 0, winreg.REG_SZ, cmd)
+            winreg.SetValueEx(key, STARTUP_NAME, 0, winreg.REG_SZ, startup_command())
         else:
             try: winreg.DeleteValue(key, STARTUP_NAME)
             except: pass
@@ -757,31 +777,95 @@ def set_startup(enable):
         return False
 
 # ── Single Instance ──────────────────────────────────────────
+_SCRIPT_RE = re.compile(r'[\\/]wplus(_service)?\.pyw?"?(\s|$)', re.I)
+_MUTEX_NAME = "Local\\KuchiSofts.WPlus.Service"
+_mutex = None
+
+def _instance_exe_names():
+    names = {"wplus.exe"}
+    if getattr(sys, 'frozen', False):
+        names.add(os.path.basename(sys.executable).lower())  # e.g. a renamed WPlus-2.0.1.exe
+    return names
+
+def select_old_instances(procs, me, parent, exe_names):
+    """PIDs of other WPlus instances in a Win32_Process list, children first.
+    Never this process, its parent (the PyInstaller onefile bootloader is also
+    WPlus.exe) or its own children; never unrelated Python processes."""
+    keep = {me, parent}
+    found = {}
+    for p in procs:
+        try: pid, ppid = int(p.get("ProcessId")), int(p.get("ParentProcessId") or 0)
+        except (TypeError, ValueError): continue
+        if pid in keep or ppid == me or pid <= 4:
+            continue
+        name = str(p.get("Name") or "").lower()
+        cmd = str(p.get("CommandLine") or "")
+        if name in exe_names or (name in ("python.exe", "pythonw.exe") and _SCRIPT_RE.search(cmd)):
+            found[pid] = ppid
+    # Children (the onefile app / venv interpreter) before their parent, so a bootloader
+    # can still remove its temp folder when its child exits
+    return sorted(found, key=lambda pid: found[pid] not in found)
+
+def _list_processes():
+    ps = ("[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; "
+          "@(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | "
+          "Select-Object ProcessId,ParentProcessId,Name,CommandLine) | ConvertTo-Json -Compress")
+    r = subprocess.run(["powershell", "-NoProfile", "-Command", ps],
+        capture_output=True, encoding="utf-8", errors="replace", timeout=20,
+        creationflags=subprocess.CREATE_NO_WINDOW)
+    data = json.loads(r.stdout or "[]")
+    return [data] if isinstance(data, dict) else data
+
+def _pid_alive(pid):
+    import ctypes
+    k32 = ctypes.WinDLL("kernel32")
+    k32.OpenProcess.restype = ctypes.c_void_p
+    h = k32.OpenProcess(0x00100000, False, pid)  # SYNCHRONIZE
+    if not h: return True  # Cannot tell (e.g. access denied): try to stop it anyway
+    try: return k32.WaitForSingleObject(ctypes.c_void_p(h), 0) == 0x102  # WAIT_TIMEOUT
+    finally: k32.CloseHandle(ctypes.c_void_p(h))
+
 def kill_old_instances():
-    """Stop previous WPlus instances only: WPlus.exe processes and python/pythonw
-    processes whose command line runs wplus.py (or the old wplus_service.pyw).
-    Never touches unrelated Python processes, this process or its parent
-    (the PyInstaller onefile bootloader is also named WPlus.exe)."""
-    keep = f"{os.getpid()},{os.getppid()}"
-    ps = (
-        f"$keep=@({keep}); "
-        "Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { "
-        "$keep -notcontains $_.ProcessId -and ("
-        "$_.Name -eq 'WPlus.exe' -or "
-        "(($_.Name -eq 'python.exe' -or $_.Name -eq 'pythonw.exe') -and "
-        "$_.CommandLine -match '[\\\\/]wplus(_service)?\\.pyw?\"?(\\s|$)')) } | "
-        "ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue; 'killed:' + $_.ProcessId }"
-    )
+    """Stop previous WPlus instances only: WPlus.exe processes (and this exe's own
+    name if it was renamed) and python/pythonw processes whose command line runs
+    wplus.py (or the old wplus_service.pyw). Returns how many were stopped."""
     try:
-        r = subprocess.run(["powershell", "-NoProfile", "-Command", ps],
-            capture_output=True, text=True, timeout=15,
-            creationflags=subprocess.CREATE_NO_WINDOW)
-        killed = [l for l in r.stdout.strip().split("\n") if l.startswith("killed:")]
-        if killed:
-            time.sleep(1)  # Wait for old process to fully exit
-            return len(killed)
-    except Exception: pass
-    return 0
+        pids = select_old_instances(_list_processes(), os.getpid(), os.getppid(), _instance_exe_names())
+    except Exception:
+        return 0
+    killed = 0
+    for pid in pids:
+        if not _pid_alive(pid):
+            continue  # A bootloader that already exited after its child
+        try:
+            os.kill(pid, 9)  # TerminateProcess on Windows
+            killed += 1
+        except OSError:
+            pass
+        time.sleep(0.3)
+    if killed:
+        time.sleep(1)  # Wait for old process to fully exit
+    return killed
+
+def acquire_single_instance(wait=5.0):
+    """Hold a named mutex for the life of the process. False if another instance
+    still holds it after `wait` seconds (e.g. one running elevated that could not
+    be stopped)."""
+    global _mutex
+    import ctypes
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.CreateMutexW.restype = ctypes.c_void_p
+    k32.CreateMutexW.argtypes = (ctypes.c_void_p, ctypes.c_int, ctypes.c_wchar_p)
+    end = time.time() + wait
+    while True:
+        h = k32.CreateMutexW(None, False, _MUTEX_NAME)
+        if h and ctypes.get_last_error() != 183:  # ERROR_ALREADY_EXISTS
+            _mutex = h
+            return True
+        if h: k32.CloseHandle(ctypes.c_void_p(h))
+        if not h or time.time() >= end:
+            return not h  # Could not create a mutex at all: do not block startup
+        time.sleep(0.5)
 
 # ── Entry Point ──────────────────────────────────────────────
 def main():
@@ -792,6 +876,16 @@ def main():
     killed = kill_old_instances()
     if killed:
         log(f"Replaced {killed} old instance(s)")
+    if not acquire_single_instance():
+        try:
+            import ctypes
+            ctypes.windll.user32.MessageBoxW(0,
+                "WPlus is already running and could not be replaced.\n\n"
+                "Quit it from the system tray (or Task Manager) and start WPlus again.",
+                "WPlus", 0x30)
+        except Exception: pass
+        return
+    refresh_startup_entry()
 
     icon = create_tray()
     state["icon"] = icon
