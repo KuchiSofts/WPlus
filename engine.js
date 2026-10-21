@@ -227,160 +227,141 @@
   }
 
   // ── Message hooks ─────────────────────────────────────────
+  var HEADER='\u{1F6AB} *This message was deleted:*\n';
+  var MEDIA_T=['image','video','sticker','document','audio','ptt'];
+  var CAPTURE_T=['chat','image','video','ptt','audio','document','sticker','vcard','location'];
+  function sid(w){return w&&w._serialized?w._serialized:'';}
+  function chatTitle(chat){return chat.__x_name||chat.__x_formattedTitle||(chat.id?chat.id.user:'?');}
+  // Text for a deleted message that cannot be shown as media again (its media data is gone)
+  function placeholder(type,caption,body,lat,lng){
+    if(type==='location')return '\u{1F4CD} Location'+(lat!=null&&lng!=null?' '+lat+', '+lng:'');
+    var lbl={image:'\u{1F4F7} Photo',video:'\u{1F3AC} Video',sticker:'\u{1F3A8} Sticker',document:'\u{1F4C4} Document',audio:'\u{1F3B5} Audio',ptt:'\u{1F3A4} Voice message'}[type];
+    return lbl?lbl+(caption?'\n'+caption:''):(body||'');
+  }
   function restoreMsg(msg){
     try{
-      var header='\u{1F6AB} *This message was deleted:*\n';
-      var mt=['image','video','sticker','document','audio','ptt'];
-      if(mt.indexOf(msg.__x_backupType)!==-1){
+      if(MEDIA_T.indexOf(msg.__x_backupType)!==-1&&msg.__x_backupMediaData){
         msg.__x_type=msg.__x_backupType;msg.__x_body=msg.__x_backupBody;
-        msg.__x_text=header+(msg.__x_backupText||'');
-        msg.__x_caption=header+(msg.__x_backupCaption||'');
+        msg.__x_text=HEADER+(msg.__x_backupText||'');
+        msg.__x_caption=HEADER+(msg.__x_backupCaption||'');
         msg.__x_mediaData=msg.__x_backupMediaData;msg.__x_isMMS=true;msg.__x_isMedia=true;
       }else{
-        msg.__x_type='chat';
-        var body=msg.__x_backupBody||msg.__x_backupText||'';
-        msg.__x_body=header+body;
-        msg.__x_text=header+body;
+        var body=placeholder(msg.__x_backupType,msg.__x_backupCaption,msg.__x_backupBody||msg.__x_backupText||'',msg.__x_backupLat,msg.__x_backupLng);
+        msg.__x_type='chat';msg.__x_body=HEADER+body;msg.__x_text=HEADER+body;
       }
-      msg.__x_isRevoked=false;
-      dbg('restore','Msg restored: '+(msg.__x_backupType||'chat')+' | '+(msg.__x_backupBody||'').substring(0,30));
+      msg.__x_isRevoked=false;msg.__wpRestored=true;
+      dbg('restore','Msg restored: '+(msg.__x_backupType||'chat')+' | '+String(msg.__x_backupBody||'').substring(0,30));
     }catch(e){dbg('restore','Error: '+e.message);}
+  }
+
+  // Keep a copy of an incoming message on the model itself (for every loaded message, not only new ones,
+  // so a message that was already on screen when WPlus started can still be restored)
+  function backup(msg){
+    if(!msg||msg.__x_backupType||msg.__wpRestored)return false;
+    var mid=msg.__x_id||msg.id;if(!mid||mid.fromMe)return false;
+    if(CAPTURE_T.indexOf(msg.__x_type)===-1)return false;
+    msg.__x_backupBody=msg.__x_body;msg.__x_backupText=msg.__x_text;msg.__x_backupType=msg.__x_type;
+    msg.__x_backupCaption=msg.__x_caption;msg.__x_backupMediaData=msg.__x_mediaData;
+    msg.__x_backupLat=msg.__x_lat;msg.__x_backupLng=msg.__x_lng;
+    // In groups __x_from is the group JID; the actual sender is __x_author
+    msg.__x_backupTime=Date.now();msg.__x_backupSender=sid(msg.__x_author)||sid(msg.__x_from)||'?';
+    return true;
+  }
+  // An edit updates the same model: keep the latest text so a later delete saves what was last shown
+  function noteEdit(msg){
+    if(msg.__wpRestored||msg.__x_type!==msg.__x_backupType)return;
+    if(msg.__x_body&&msg.__x_body!==msg.__x_backupBody){msg.__x_backupBody=msg.__x_body;msg.__x_backupText=msg.__x_text;}
+    if(msg.__x_caption&&msg.__x_caption!==msg.__x_backupCaption)msg.__x_backupCaption=msg.__x_caption;
+    if(msg.__x_mediaData&&!msg.__x_backupMediaData)msg.__x_backupMediaData=msg.__x_mediaData;
+  }
+  // Send a newly received message to the file server (once)
+  function postNew(msg,chat){
+    if(msg.__wpPosted||!(msg.isNewMsg||msg.__x_isNewMsg))return;msg.__wpPosted=true;
+    var msgId=sid(msg.__x_id)||'?',sender=msg.__x_backupSender||'?';
+    var isViewOnce=!!(msg.__x_isViewOnce||msg.__x_viewOnce);
+    if(debugEnabled){
+      var senderName='';
+      try{var c=CON&&CON.get?CON.get(sender):null;if(c)senderName=c.__x_name||c.__x_pushname||c.__x_formattedName||'';}catch(e){}
+      dbg('msg:new','NEW MESSAGE',{id:msgId.substring(0,50),type:msg.__x_type,chat:chatTitle(chat),sender:sender.split('@')[0],senderName:senderName,
+        bodyLength:(msg.__x_body||'').length,bodyPreview:String(msg.__x_body||'').substring(0,50).replace(/[\n\r]/g,' '),
+        hasMedia:!!(msg.__x_mediaData&&msg.__x_mediaData.mediaBlob),caption:String(msg.__x_caption||'').substring(0,50),isViewOnce:isViewOnce,
+        isGroupMsg:!!(chat.id&&chat.id.server==='g.us'),msgTimestamp:msg.__x_t||0});
+    }
+    var entry={id:msgId,type:msg.__x_type,body:msg.__x_body||'',text:msg.__x_text||'',
+      caption:msg.__x_caption||'',sender:sender,time:Date.now(),chat:chatTitle(chat)};
+    var md=msg.__x_mediaData;
+    if(md&&md.mediaBlob&&md.mediaBlob._blob){
+      var blob=md.mediaBlob._blob;
+      dbg('msg:new','Media blob captured: '+blob.type+' ('+Math.round(blob.size/1024)+'KB)');
+      var reader=new FileReader();
+      reader.onload=function(){entry.media=reader.result;serverPost('/msg/new',entry);};
+      reader.onerror=function(){serverPost('/msg/new',entry);};
+      reader.readAsDataURL(blob);
+    }else serverPost('/msg/new',entry);
+    if(isViewOnce){dbg('msg:new','VIEW-ONCE detected! Capturing...');captureViewOnce(msg);}
+  }
+
+  function onRevoked(msg,chat){
+    if(msg.__wpSaved){restoreMsg(msg);return;}  // WhatsApp marked it revoked again — already saved
+    msg.__wpSaved=true;
+    var msgId=sid(msg.__x_id)||'?';
+    var sender=msg.__x_backupSender||'?';
+    dbg('msg:del','MESSAGE DELETED',{id:msgId.substring(0,50),originalType:msg.__x_backupType,chat:chatTitle(chat),sender:sender.split('@')[0],
+      bodyPreview:String(msg.__x_backupBody||msg.__x_backupText||'').substring(0,60).replace(/[\n\r]/g,' '),
+      caption:String(msg.__x_backupCaption||'').substring(0,40),hasMediaBackup:!!(msg.__x_backupMediaData&&msg.__x_backupMediaData.mediaBlob),
+      timeSinceReceived:Math.round((Date.now()-(msg.__x_backupTime||Date.now()))/1000)+'s'});
+
+    // Message time (seconds → ms) lets later sessions match the revoked placeholder exactly
+    var entry={id:msgId,type:msg.__x_backupType,body:msg.__x_backupBody,
+      text:msg.__x_backupText,caption:msg.__x_backupCaption,sender:sender,
+      time:msg.__x_t?msg.__x_t*1000:(msg.__x_backupTime||Date.now()),chat:chatTitle(chat),media:null};
+    if(msg.__x_backupType==='location'&&msg.__x_backupLat!=null){entry.lat=msg.__x_backupLat;entry.lng=msg.__x_backupLng;}
+
+    serverPost('/msg/deleted',entry,function(r){noteMediaFile(entry.id,r);});
+
+    // Try to capture media blob for images/videos/audio
+    if(['image','video','ptt','audio','sticker'].indexOf(msg.__x_backupType)!==-1){
+      try{
+        var md=msg.__x_backupMediaData||msg.__x_mediaData;
+        if(md&&md.mediaBlob&&md.mediaBlob._blob){
+          var blob=md.mediaBlob._blob;
+          dbg('msg:del','Media blob found: '+blob.type+' ('+Math.round(blob.size/1024)+'KB)');
+          var reader=new FileReader();
+          reader.onload=function(){try{
+            entry.media=reader.result;entry.mime=blob.type;
+            var d=deletedMsgs('get');
+            for(var i=d.length-1;i>=0;i--){if(d[i].id===entry.id){d[i].media=entry.media;d[i].mime=entry.mime;break;}}
+            saveDel(d);
+            serverPost('/msg/deleted',entry,function(r){noteMediaFile(entry.id,r);});
+            dbg('msg:del','Media sent to file server');
+          }catch(e){dbg('msg:del','Media save error: '+e.message);}};
+          reader.readAsDataURL(blob);
+        }else dbg('msg:del','No media blob available for '+msg.__x_backupType+' message');
+      }catch(e){dbg('msg:del','Media capture error: '+e.message);}
+    }
+
+    deletedMsgs('add',entry);
+    restoreMsg(msg);
+    dbg('msg:del','Saved and restored in chat UI');
+    fire('update');
   }
 
   // Runs inside WhatsApp's collection 'add' — must never throw
   function hookChat(chat){try{hookChatMsgs(chat);}catch(e){if(chat&&chat.msgs)delete chat.msgs.__wp;dbg('init','hookChat failed: '+e.message);}}
   function hookChatMsgs(chat){
     if(!chat||!chat.msgs||chat.msgs.__wp)return;chat.msgs.__wp=true;_cols.push(chat.msgs);
-    var chatName=chat.__x_name||chat.__x_formattedTitle||(chat.id?chat.id.user:'?');
+    (chat.msgs._models||[]).forEach(function(m){try{if(backup(m))postNew(m,chat);}catch(e){}});
 
     listen(chat.msgs,'add',function(msg){try{
-      if(!msg||!msg.isNewMsg||(msg.id&&msg.id.fromMe))return;
-      var ok=['chat','image','video','ptt','audio','document','sticker','vcard','location'];
-      if(ok.indexOf(msg.__x_type)===-1)return;
-
-      // Full message details for debug
-      var msgId=(msg.__x_id&&msg.__x_id._serialized)?msg.__x_id._serialized:'?';
-      var sender=(msg.__x_from&&msg.__x_from._serialized)?msg.__x_from._serialized:'?';
-      var senderName='';
-      var actualSender=sender;
-      // In groups, __x_from is group JID — actual sender is in __x_author
-      try{
-        if(msg.__x_author&&msg.__x_author._serialized)actualSender=msg.__x_author._serialized;
-        if(CON&&actualSender){
-          var c=CON.get?CON.get(actualSender):null;
-          if(c)senderName=c.__x_name||c.__x_pushname||c.__x_formattedName||'';
-        }
-      }catch(e){}
-      var hasMedia=!!(msg.__x_mediaData&&msg.__x_mediaData.mediaBlob);
-      var hasCaption=!!(msg.__x_caption&&msg.__x_caption.length>0);
-      var bodyLen=(msg.__x_body||'').length;
-      var isViewOnce=!!(msg.__x_isViewOnce||msg.__x_viewOnce);
-      var timestamp=msg.__x_t?new Date(msg.__x_t*1000).toLocaleString():'?';
-
-      dbg('msg:new','NEW MESSAGE',{
-        id:msgId.substring(0,50),
-        type:msg.__x_type,
-        chat:chatName,
-        chatJid:sender.split('@')[0],
-        sender:actualSender.split('@')[0],
-        senderName:senderName,
-        bodyLength:bodyLen,
-        bodyPreview:(msg.__x_body||'').substring(0,50).replace(/[\n\r]/g,' '),
-        hasMedia:hasMedia,
-        hasCaption:hasCaption,
-        caption:hasCaption?(msg.__x_caption||'').substring(0,50):'',
-        isViewOnce:isViewOnce,
-        timestamp:timestamp,
-        forwardCount:msg.__x_forwardingScore||0,
-        isStarred:msg.__x_star===true,
-        quotedMsgId:msg.__x_quotedMsg&&msg.__x_quotedMsg.__x_id?msg.__x_quotedMsg.__x_id._serialized.substring(0,30):'',
-        isGroupMsg:!!(chat.id&&chat.id.server==='g.us'),
-        msgTimestamp:msg.__x_t||0
-      });
-
-      // Backup
-      msg.__x_backupBody=msg.__x_body;msg.__x_backupText=msg.__x_text;msg.__x_backupType=msg.__x_type;
-      msg.__x_backupCaption=msg.__x_caption;msg.__x_backupMediaData=msg.__x_mediaData;
-      msg.__x_backupTime=Date.now();msg.__x_backupSender=sender;
-
-      // Save to file server
-      var entry={id:msgId,type:msg.__x_type,body:msg.__x_body||'',text:msg.__x_text||'',
-        caption:msg.__x_caption||'',sender:sender,time:Date.now(),chat:chatName};
-
-      var md=msg.__x_mediaData;
-      if(md&&md.mediaBlob&&md.mediaBlob._blob){
-        var blob=md.mediaBlob._blob;
-        dbg('msg:new','Media blob captured: '+blob.type+' ('+Math.round(blob.size/1024)+'KB)');
-        var reader=new FileReader();
-        reader.onload=function(){entry.media=reader.result;serverPost('/msg/new',entry);};
-        reader.readAsDataURL(blob);
-      } else {
-        serverPost('/msg/new',entry);
-        if(hasMedia)dbg('msg:new','Media blob NOT available (will try later)');
-      }
-
-      if(isViewOnce){dbg('msg:new','VIEW-ONCE detected! Capturing...');captureViewOnce(msg);}
+      if(backup(msg))postNew(msg,chat);
     }catch(e){dbg('msg:new','ERROR: '+e.message);}});
 
+    // Revoke ("deleted for everyone") changes the message's type to 'revoked' on the same model.
+    // A message can also arrive undecrypted ('ciphertext') and only become 'chat' later.
     listen(chat.msgs,'change',function(msg){try{
-      if(!msg||msg.__x_type!=='revoked'||!msg.__x_backupType)return;
-
-      var msgId=msg.__x_id?msg.__x_id._serialized:'?';
-      var sender=msg.__x_backupSender||'?';
-      var timeSinceBackup=Date.now()-(msg.__x_backupTime||Date.now());
-      var hasBackupMedia=!!(msg.__x_backupMediaData&&msg.__x_backupMediaData.mediaBlob);
-
-      dbg('msg:del','MESSAGE DELETED',{
-        id:msgId.substring(0,50),
-        originalType:msg.__x_backupType,
-        chat:chatName,
-        sender:sender.split('@')[0],
-        bodyPreview:(msg.__x_backupBody||msg.__x_backupText||'').substring(0,60).replace(/[\n\r]/g,' '),
-        bodyLength:(msg.__x_backupBody||'').length,
-        hasCaption:!!(msg.__x_backupCaption),
-        caption:(msg.__x_backupCaption||'').substring(0,40),
-        hasMediaBackup:hasBackupMedia,
-        timeSinceReceived:Math.round(timeSinceBackup/1000)+'s',
-        backupTime:msg.__x_backupTime?new Date(msg.__x_backupTime).toLocaleString():'?'
-      });
-
-      var entry={id:msgId,type:msg.__x_backupType,body:msg.__x_backupBody,
-        text:msg.__x_backupText,caption:msg.__x_backupCaption,sender:sender,
-        time:msg.__x_backupTime||Date.now(),chat:chatName,media:null};
-
-      serverPost('/msg/deleted',entry,function(r){noteMediaFile(entry.id,r);});
-      dbg('msg:del','Sent to file server for permanent storage');
-
-      // Try to capture media blob for images/videos/audio
-      var mediaTypes=['image','video','ptt','audio','sticker'];
-      if(mediaTypes.indexOf(msg.__x_backupType)!==-1){
-        try{
-          var md=msg.__x_backupMediaData||msg.__x_mediaData;
-          if(md&&md.mediaBlob&&md.mediaBlob._blob){
-            var blob=md.mediaBlob._blob;
-            dbg('msg:del','Media blob found: '+blob.type+' ('+Math.round(blob.size/1024)+'KB)');
-            var reader=new FileReader();
-            reader.onload=function(){
-              entry.media=reader.result;entry.mime=blob.type;
-              dbg('msg:del','Media captured as base64 ('+Math.round(reader.result.length/1024)+'KB)');
-              var d=deletedMsgs('get');
-              for(var i=d.length-1;i>=0;i--){if(d[i].id===entry.id){d[i].media=entry.media;d[i].mime=entry.mime;break;}}
-              saveDel(d);
-              serverPost('/msg/deleted',entry,function(r){noteMediaFile(entry.id,r);});
-              dbg('msg:del','Media sent to file server');
-            };
-            reader.readAsDataURL(blob);
-          } else {
-            dbg('msg:del','No media blob available for '+msg.__x_backupType+' message');
-          }
-        }catch(e){dbg('msg:del','Media capture error: '+e.message);}
-      }
-
-      deletedMsgs('add',entry);
-      dbg('msg:del','Saved to localStorage ('+deletedMsgs('get').length+' total)');
-      restoreMsg(msg);
-      dbg('msg:del','Message restored in chat UI');
-      fire('update');
+      if(!msg)return;
+      if(msg.__x_type!=='revoked'){if(msg.__x_backupType)noteEdit(msg);else if(backup(msg))postNew(msg,chat);return;}
+      if(msg.__x_backupType)onRevoked(msg,chat);
     }catch(e){dbg('msg:del','HANDLER ERROR: '+e.message);}});
   }
 
