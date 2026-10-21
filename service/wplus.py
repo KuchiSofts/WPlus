@@ -632,7 +632,11 @@ def service_loop():
             if wa: break
             time.sleep(2)
         if not wa:
-            log("No debug port — restart WhatsApp")
+            try: hklm = _hklm_policy_ok()
+            except Exception: hklm = True
+            # Without the machine-wide policy (UAC prompt declined) WebView2 150+ keeps the port closed
+            log("No debug port — restart WhatsApp" if hklm else
+                "No debug port — restart WPlus and allow the admin prompt, then restart WhatsApp")
             return False
         state["ws_url"] = wa["webSocketDebuggerUrl"]
         ensure_bridge(state["ws_url"])
