@@ -11,7 +11,7 @@ Single exe that contains everything:
 
 On first run, creates data/ folder structure.
 """
-import sys, os, json, http.client, time, subprocess, threading, base64, tempfile, ssl, secrets
+import sys, os, json, http.client, time, subprocess, threading, ssl, secrets
 
 CURRENT_VERSION = "2.0.1"  # Keep in sync with engine.js and package.json
 GITHUB_REPO = "KuchiSofts/WPlus"
@@ -167,8 +167,6 @@ def setup():
     try: os.remove(os.path.join(EXE_DIR, "_fileserver.py"))
     except OSError: pass
 
-setup()
-
 # ── File Server ──────────────────────────────────────────────
 # Source mode: fileserver.py sits next to this file in service/.
 # Frozen mode: PyInstaller bundles it as a module (or via --add-data into _MEIPASS).
@@ -196,7 +194,7 @@ def start_file_server(port):
     fileserver.start_server(port, data_dir=DATA_DIR, token=SERVER_TOKEN)
 
 # ── Tray Icon ────────────────────────────────────────────────
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw
 import pystray
 
 FILES = {
@@ -732,6 +730,9 @@ def kill_old_instances():
 
 # ── Entry Point ──────────────────────────────────────────────
 def main():
+    # Registry/folder setup runs here, not at import, so the helpers can be imported (tests)
+    setup()
+
     # Kill any existing WPlus instances
     killed = kill_old_instances()
     if killed:
