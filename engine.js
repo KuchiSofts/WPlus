@@ -230,7 +230,8 @@
   var HEADER='\u{1F6AB} *This message was deleted:*\n';
   var MEDIA_T=['image','video','sticker','document','audio','ptt'];
   var CAPTURE_T=['chat','image','video','ptt','audio','document','sticker','vcard','location'];
-  function sid(w){return w&&w._serialized?w._serialized:'';}
+  // Wids still carry _serialized; message keys (MsgKey) no longer do on current builds, only toString()
+  function sid(w){if(!w)return '';if(w._serialized)return w._serialized;if(typeof w.toString==='function'&&w.toString!==Object.prototype.toString){var s=String(w);return /_/.test(s)?s:'';}return '';}
   function chatTitle(chat){return chat.__x_name||chat.__x_formattedTitle||(chat.id?chat.id.user:'?');}
   // Text for a deleted message that cannot be shown as media again (its media data is gone)
   function placeholder(type,caption,body,lat,lng){
@@ -401,7 +402,7 @@
   function captureViewOnce(msg){
     try{
       var type=msg.__x_type||'unknown',sender=(msg.__x_backupSender||sid(msg.__x_from)||'?').split('@')[0];
-      var entry={id:msg.__x_id._serialized,type:type,sender:sender,time:Date.now(),data:null,mime:null,size:0};
+      var entry={id:sid(msg.__x_id),type:type,sender:sender,time:Date.now(),data:null,mime:null,size:0};
       var done=false;
 
       function saveEntry(){viewOnce('add',entry);fire('update');}
@@ -605,7 +606,7 @@
     for(var i=0;i<chat.msgs._models.length;i++){
       var m=chat.msgs._models[i];
       // Exact ID match — also when it was already restored (then it is no longer 'revoked')
-      if(m.__x_id&&m.__x_id._serialized===saved.id)return m;
+      if(m.__x_id&&sid(m.__x_id)===saved.id)return m;
       if(m.__x_type!=='revoked')continue;
       // Time-based match — find the closest revoked message within 60 seconds
       var mTime=m.__x_t?m.__x_t*1000:0;
@@ -888,7 +889,7 @@
     function matchSaved(msg,chatObj,list){
       if(!msg||!msg.__x_id)return null;
       var savedMsgs=list||getSavedMsgs();
-      var msgId=msg.__x_id._serialized||'';
+      var msgId=sid(msg.__x_id);
       var okey=origKey(msg);
       var msgTime=msg.__x_t?msg.__x_t*1000:0;
       var msgChat=chatObj?chatObj.id._serialized:'';
