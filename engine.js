@@ -489,16 +489,13 @@
 
   // ── Navigate to message + load older msgs + restore ─────
   function findChatByJid(jid){
+    var user=jid.split('@')[0];
+    try{var c=CC.get&&CC.get(jid);if(c)return c;}catch(e){}
     var models=CC._models||[];
     for(var i=0;i<models.length;i++){
-      if(models[i].id&&(models[i].id._serialized===jid||models[i].id.user===jid.split('@')[0]))return models[i];
+      if(models[i].id&&(models[i].id._serialized===jid||models[i].id.user===user))return models[i];
     }
-    // Partial match
-    var user=jid.split('@')[0];
-    for(var j=0;j<models.length;j++){
-      if(models[j].id&&models[j].id._serialized&&models[j].id._serialized.indexOf(user)!==-1)return models[j];
-    }
-    return null;
+    return null;  // no substring guess: it could open somebody else's chat
   }
 
   function extractJid(msgId){
@@ -507,6 +504,18 @@
     var rest=msgId.substring(firstUs+1);
     var m=rest.match(/^(.+?@[cgs]\.us)/);
     return m?m[1]:rest.split('_')[0];
+  }
+  // Chat part ("123@c.us") of a serialized message id ("false_123@c.us_ABC[_author]")
+  function idUser(msgId){return (String(msgId||'').split('_')[1]||'').split('@')[0];}
+
+  function activeChat(){
+    try{var a=CC.getActive&&CC.getActive();if(a)return a;}catch(e){}
+    var models=CC._models||[];
+    for(var i=0;i<models.length;i++)if(models[i].__x_active)return models[i];
+    var headerName='';
+    try{var hdr=document.querySelector('#main header span[dir="auto"], [data-testid="conversation-header"] span[dir="auto"]');if(hdr)headerName=hdr.textContent.trim();}catch(e){}
+    if(headerName)for(var j=0;j<models.length;j++)if(models[j].__x_name===headerName||models[j].__x_formattedTitle===headerName)return models[j];
+    return null;
   }
 
   function openChat(chat){
@@ -529,21 +538,12 @@
       var search=window.require("WAWebChatMessageSearch");
       if(Cmd&&Cmd.openChatAt&&search&&search.getSearchContext){
         var ctx=search.getSearchContext(chat,msgObj.__x_id||msgObj.id);
-        Cmd.openChatAt({chat:chat,msgContext:ctx}).then(function(){
+        Promise.resolve(Cmd.openChatAt({chat:chat,msgContext:ctx})).then(function(){
           // Flash highlight the message in the DOM
           later(function(){
             try{
-              var mid=msgObj.__x_id?msgObj.__x_id._serialized:'';
-              var el=document.querySelector('[data-id="'+mid+'"]');
-              if(!el){
-                // Try finding by approximate position — look for restored messages
-                document.querySelectorAll('.message-in, .message-out, [data-id]').forEach(function(m){
-                  var text=m.textContent||'';
-                  if(text.indexOf('\u{1F6AB}')!==-1&&text.indexOf('This message was deleted')!==-1){
-                    el=el||m;
-                  }
-                });
-              }
+              var mid=sid(msgObj.__x_id);
+              var el=mid&&document.querySelector('[data-id="'+(window.CSS&&CSS.escape?CSS.escape(mid):mid)+'"]');
               if(el){
                 el.classList.add('wplus-msg-highlight');
                 el.scrollIntoView({behavior:'smooth',block:'center'});
@@ -552,7 +552,7 @@
               }
             }catch(e){}
           },500);
-        });
+        }).catch(function(e){dbg('nav','openChatAt failed: '+(e&&e.message));});
         dbg('nav','Scrolled to message');
         return true;
       }
@@ -560,16 +560,16 @@
     return false;
   }
 
-  // Find a revoked message in chat that matches our saved data
+  // Find the message in the chat that matches our saved data
   function findRevokedInChat(chat,saved){
     if(!chat||!chat.msgs||!chat.msgs._models)return null;
     var msgTime=saved.time;
     var bestMatch=null,bestDiff=Infinity;
     for(var i=0;i<chat.msgs._models.length;i++){
       var m=chat.msgs._models[i];
-      if(m.__x_type!=='revoked')continue;
-      // Exact ID match (same session) — instant return
+      // Exact ID match — also when it was already restored (then it is no longer 'revoked')
       if(m.__x_id&&m.__x_id._serialized===saved.id)return m;
+      if(m.__x_type!=='revoked')continue;
       // Time-based match — find the closest revoked message within 60 seconds
       var mTime=m.__x_t?m.__x_t*1000:0;
       if(mTime&&msgTime){
@@ -589,7 +589,7 @@
     var allSaved=deletedMsgs('get');
     var saved=null;
     for(var i=0;i<allSaved.length;i++){if(allSaved[i].id===savedMsgId){saved=allSaved[i];break;}}
-    if(!saved){dbg('nav','Saved msg not found: '+savedMsgId.substring(0,30));return false;}
+    if(!saved){dbg('nav','Saved msg not found: '+String(savedMsgId).substring(0,30));return false;}
 
     var jid=extractJid(savedMsgId);
     if(!jid){dbg('nav','Bad ID');return false;}
@@ -607,7 +607,7 @@
       if(attempts>20){dbg('nav','Chat never loaded messages');return;}
       if(chat.msgs&&chat.msgs._models&&chat.msgs._models.length>0){
         dbg('nav','Chat has '+chat.msgs._models.length+' messages loaded, starting search');
-        searchAndRestore(chat,saved,0);
+        searchAndRestore(chat,saved,0,Date.now());
       } else {
         later(function(){waitForChatReady(attempts+1);},500);
       }
@@ -616,14 +616,13 @@
     return true;
   }
 
-  function searchAndRestore(chat,saved,attempt){
+  // startTime is per search: a shared one went stale when a search ended early and starved the next one
+  function searchAndRestore(chat,saved,attempt,startTime){
     var MAX_ATTEMPTS=100;  // Up to ~5000 messages
-    var startTime=searchAndRestore._startTime||(searchAndRestore._startTime=Date.now());
     var elapsed=Date.now()-startTime;
     var MAX_TIME=120000;  // 2 minute time budget
 
     if(attempt>MAX_ATTEMPTS||elapsed>MAX_TIME){
-      searchAndRestore._startTime=null;
       dbg('nav','Gave up after '+attempt+' loads ('+Math.round(elapsed/1000)+'s, '+(chat.msgs._models?chat.msgs._models.length:0)+' msgs searched)');
       return;
     }
@@ -631,9 +630,8 @@
     // Search current messages for our target
     var found=findRevokedInChat(chat,saved);
     if(found){
-      searchAndRestore._startTime=null;
       dbg('nav','FOUND after '+attempt+' loads! ('+Math.round(elapsed/1000)+'s)');
-      applyRestore(found,saved);
+      if(found.__x_type==='revoked')applyRestore(found,saved);
       scrollToMsg(chat,found);
       fire('update');
       return;
@@ -645,21 +643,13 @@
       var loader=window.require("WAWebChatLoadMessages");
       if(loader&&loader.loadEarlierMsgs){
         var msgsBefore=chat.msgs._models?chat.msgs._models.length:0;
-        loader.loadEarlierMsgs(chat).then(function(){
+        Promise.resolve(loader.loadEarlierMsgs(chat)).then(function(){
+          if(dead)return;
           var msgsAfter=chat.msgs._models?chat.msgs._models.length:0;
-
-          if(msgsAfter===msgsBefore){
-            searchAndRestore._startTime=null;
-            dbg('nav','No more history ('+msgsAfter+' msgs). Message not found.');
-            return;
-          }
-
+          if(msgsAfter===msgsBefore){dbg('nav','No more history ('+msgsAfter+' msgs). Message not found.');return;}
           // Immediately search and load more — no delay
-          searchAndRestore(chat,saved,attempt+1);
-        }).catch(function(e){
-          dbg('nav','Load error: '+e.message);
-          searchAndRestore._startTime=null;
-        });
+          searchAndRestore(chat,saved,attempt+1,startTime);
+        }).catch(function(e){dbg('nav','Load error: '+(e&&e.message));});
         return;
       }
     }catch(e){dbg('nav','Loader error: '+e.message);}
@@ -670,120 +660,82 @@
   // Apply restore to a found message
   function applyRestore(msg,saved){
     try{
-      var header='\u{1F6AB} *This message was deleted:*\n';
-      var mediaTypes=['image','video','sticker','document','audio','ptt'];
-      if(mediaTypes.indexOf(saved.type)!==-1){
+      if(msg.__x_backupType){restoreMsg(msg);msg.__wpSavedId=saved.id;return true;}  // same session: full backup on the model
+      // Rebuild as media only while WhatsApp still has the media data; a media message without it can break rendering
+      if(MEDIA_T.indexOf(saved.type)!==-1&&msg.__x_mediaData){
         msg.__x_type=saved.type;msg.__x_body=saved.body||'';
-        msg.__x_text=header+(saved.text||'');msg.__x_caption=header+(saved.caption||'');
+        msg.__x_text=HEADER+(saved.text||'');msg.__x_caption=HEADER+(saved.caption||'');
         msg.__x_isMMS=true;msg.__x_isMedia=true;
       }else{
-        msg.__x_type='chat';
-        msg.__x_body=header+(saved.body||saved.text||'');
-        msg.__x_text=header+(saved.body||saved.text||'');
+        var body=placeholder(saved.type,saved.caption,saved.body||saved.text||'',saved.lat,saved.lng);
+        msg.__x_type='chat';msg.__x_body=HEADER+body;msg.__x_text=HEADER+body;
       }
-      msg.__x_isRevoked=false;
-      dbg('restore','Applied: '+(saved.type||'chat')+' | '+(saved.body||saved.text||'?').substring(0,30));
+      msg.__x_isRevoked=false;msg.__wpRestored=true;msg.__wpSavedId=saved.id;
+      dbg('restore','Applied: '+(saved.type||'chat')+' | '+String(saved.body||saved.text||'?').substring(0,30));
       return true;
     }catch(e){dbg('restore','Apply error: '+e.message);return false;}
   }
 
   // ── Force restore current chat ──────────────────────────
   function forceRestoreCurrentChat(callback){
-    // Find which chat is currently open
-    var currentChat=null;
-    var headerName='';
-    try{
-      var hdr=document.querySelector('[data-testid="conversation-header"] span[dir="auto"], header span.x1iyjqo2');
-      if(hdr)headerName=hdr.textContent.trim();
-    }catch(e){}
-
-    if(headerName){
-      (CC._models||[]).forEach(function(ch){
-        if(!currentChat&&(ch.__x_name===headerName||ch.__x_formattedTitle===headerName))currentChat=ch;
-      });
-    }
-    if(!currentChat){
-      // Try finding by checking which chat has focus/active
-      (CC._models||[]).forEach(function(ch){
-        if(!currentChat&&ch.__x_active)currentChat=ch;
-      });
-    }
-
-    if(!currentChat){dbg('restore','No active chat found');if(callback)callback(0);return;}
+    var done=false;
+    function finish(n){if(done)return;done=true;if(callback)try{callback(n);}catch(e){}fire('update');}
+    var currentChat=CC?activeChat():null;
+    if(!currentChat||!currentChat.id){dbg('restore','No active chat found');finish(0);return;}
     dbg('restore','Force restoring: '+(currentChat.__x_name||currentChat.__x_formattedTitle||'?'));
 
-    // Get saved messages for this chat
-    var allSaved=deletedMsgs('get');
-    var chatJid=currentChat.id._serialized;
-    var chatSaved=allSaved.filter(function(s){
-      // Match by chat JID in the saved message ID
-      return s.id&&s.id.indexOf(chatJid.split('@')[0])!==-1;
-    });
+    // Saved messages whose id belongs to this chat
+    var chatUser=currentChat.id._serialized.split('@')[0];
+    var chatSaved=deletedMsgs('get').filter(function(s){return s&&s.id&&idUser(s.id)===chatUser;});
 
-    if(!chatSaved.length){dbg('restore','No saved messages for this chat');if(callback)callback(0);return;}
+    if(!chatSaved.length){dbg('restore','No saved messages for this chat');finish(0);return;}
     dbg('restore','Found '+chatSaved.length+' saved messages for this chat');
 
     // Load ALL messages then restore
     var totalRestored=0;
+    function mark(s){if(!s.__restored){s.__restored=true;totalRestored++;}}
     function loadAndRestore(attempt){
-      if(attempt>20){
-        dbg('restore','Force restore done: '+totalRestored+' restored');
-        if(callback)callback(totalRestored);
-        return;
-      }
+      if(dead)return;
+      if(attempt>20){dbg('restore','Force restore done: '+totalRestored+' restored');finish(totalRestored);return;}
 
-      // Check current messages for revoked ones we can restore
+      // Check current messages: revoked ones we can restore, and ones the live watcher already restored
       if(currentChat.msgs&&currentChat.msgs._models){
         currentChat.msgs._models.forEach(function(m){
-          if(m.__x_type!=='revoked')return;
+          var mid=sid(m.__x_id);
+          if(m.__x_type!=='revoked'){
+            if(m.__wpRestored)chatSaved.forEach(function(s){if(s.id===m.__wpSavedId||s.id===mid)mark(s);});
+            return;
+          }
           var mTime=m.__x_t?m.__x_t*1000:0;
-          // Find matching saved message
           for(var i=0;i<chatSaved.length;i++){
             var s=chatSaved[i];
             if(s.__restored)continue;
             // Match by exact ID or time within 5 seconds
-            if(s.id===m.__x_id._serialized||(mTime&&s.time&&Math.abs(mTime-s.time)<5000)){
-              applyRestore(m,s);
-              s.__restored=true;
-              totalRestored++;
+            if(s.id===mid||(mTime&&s.time&&Math.abs(mTime-s.time)<5000)){
+              if(applyRestore(m,s))mark(s);
               break;
             }
           }
         });
       }
 
-      // Check if all saved messages are restored
-      var allDone=chatSaved.every(function(s){return s.__restored;});
-      if(allDone){
-        dbg('restore','All '+totalRestored+' messages restored!');
-        if(callback)callback(totalRestored);
-        fire('update');
-        return;
-      }
+      if(chatSaved.every(function(s){return s.__restored;})){dbg('restore','All '+totalRestored+' messages restored!');finish(totalRestored);return;}
 
       // Load more messages
       try{
         var loader=window.require("WAWebChatLoadMessages");
         if(loader&&loader.loadEarlierMsgs){
           var before=currentChat.msgs._models?currentChat.msgs._models.length:0;
-          loader.loadEarlierMsgs(currentChat).then(function(){
+          Promise.resolve(loader.loadEarlierMsgs(currentChat)).then(function(){
             var after=currentChat.msgs._models?currentChat.msgs._models.length:0;
             dbg('restore','Loaded '+(after-before)+' more (total: '+after+')');
-            if(after===before){
-              // No more messages to load
-              dbg('restore','No more history. Restored: '+totalRestored);
-              if(callback)callback(totalRestored);
-              fire('update');
-              return;
-            }
+            if(after===before){dbg('restore','No more history. Restored: '+totalRestored);finish(totalRestored);return;}
             later(function(){loadAndRestore(attempt+1);},300);
-          }).catch(function(){
-            if(callback)callback(totalRestored);
-          });
+          }).catch(function(){finish(totalRestored);});
           return;
         }
       }catch(e){}
-      if(callback)callback(totalRestored);
+      finish(totalRestored);
     }
 
     loadAndRestore(0);
@@ -891,9 +843,9 @@
 
     function getSavedMsgs(){return deletedMsgs('get');}
 
-    function matchSaved(msg,chatObj){
+    function matchSaved(msg,chatObj,list){
       if(!msg||!msg.__x_id)return null;
-      var savedMsgs=getSavedMsgs();
+      var savedMsgs=list||getSavedMsgs();
       var msgId=msg.__x_id._serialized||'';
       var msgTime=msg.__x_t?msg.__x_t*1000:0;
       var msgChat=chatObj?chatObj.id._serialized:'';
@@ -956,7 +908,7 @@
         if(!ch.msgs||!ch.msgs._models)return;
         ch.msgs._models.forEach(function(m){
           if(m.__x_type!=='revoked')return;
-          var saved=matchSaved(m,ch);
+          var saved=matchSaved(m,ch,savedMsgs);
           if(saved&&applyRestore(m,saved)){
             restored++;
             dbg('restore','Restored: '+(saved.type||'chat')+' | '+(saved.body||saved.text||'?').substring(0,30)+' in '+(ch.__x_name||'?').substring(0,20));
