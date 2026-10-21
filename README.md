@@ -204,7 +204,7 @@ is not writable):
 | Path | Contents |
 |------|----------|
 | `data/new_messages.json` | Rolling backup of incoming messages (text, sender, chat name) from the last 60 hours, so they can be restored if deleted. Older entries and their media are removed automatically. |
-| `data/deleted_messages.json` | Messages that were deleted for everyone and caught by WPlus. Kept until you use *Clear all*. |
+| `data/deleted_messages.json` | Messages that were deleted for everyone and caught by WPlus. Kept until you use *Clear all*, which also deletes their saved media files. |
 | `data/Images/`, `Videos/`, `Sounds/`, `Docs/` | Media files for the messages above. |
 | `data/settings.json` | Your panel toggles. |
 | `data/status.txt` | Tray app status log (connection state only, no message content). |

@@ -446,10 +446,17 @@ class Handler(BaseHTTPRequestHandler):
 
         # Clear all saved deleted messages (UI "Clear all")
         if path == "/deleted/clear":
+            # Also delete the media files saved for these messages (only inside the media folders)
             with _lock:
-                count = len(load_json(DEL_MSGS, []))
+                del_msgs = load_json(DEL_MSGS, [])
                 save_json(DEL_MSGS, [])
-            self._ok({"cleared": count})
+                kept = {m.get("mediaFile") for m in load_json(NEW_MSGS, []) if isinstance(m, dict)}
+                removed = 0
+                for m in del_msgs:
+                    rel = m.get("mediaFile") if isinstance(m, dict) else None
+                    if rel and rel not in kept and _remove_media(rel):
+                        removed += 1
+            self._ok({"cleared": len(del_msgs), "mediaRemoved": removed})
             return
 
         # Migrate — re-process old deleted messages, save their media to files
