@@ -3,7 +3,7 @@
   'use strict';
   // Allow re-injection by cleaning up previous instance
   if(window.__wplus&&window.__wplus.cleanup)try{window.__wplus.cleanup();}catch(e){}
-  window.__wplus={version:'2.0.1',ready:false};  // Keep in sync with CURRENT_VERSION in service/wplus.py
+  window.__wplus={version:'2.1.0',ready:false};  // Keep in sync with CURRENT_VERSION in service/wplus.py
 
   var MAX_MSGS=1000;
   var CC=null,CON=null,GRP=null;

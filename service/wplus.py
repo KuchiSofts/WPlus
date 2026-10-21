@@ -13,7 +13,7 @@ On first run, creates data/ folder structure.
 """
 import sys, os, re, json, http.client, time, subprocess, threading, ssl, secrets
 
-CURRENT_VERSION = "2.0.1"  # Keep in sync with engine.js and package.json
+CURRENT_VERSION = "2.1.0"  # Keep in sync with engine.js and package.json
 GITHUB_REPO = "KuchiSofts/WPlus"
 
 # ── Path Setup ───────────────────────────────────────────────
@@ -150,6 +150,29 @@ def ensure_debug_port():
     except OSError: pass
     return changed
 
+# Microsoft Store WhatsApp Desktop (AppUserModelID) — used to start it again after a restart
+WA_APP_ID = "5319275A.WhatsAppDesktop_cv1g1gvanyjgm!App"
+
+def restart_whatsapp():
+    """Close WhatsApp Desktop and start it again, so WebView2 picks up the debug-port policy."""
+    flags = subprocess.CREATE_NO_WINDOW
+    for exe in ("WhatsApp.Root.exe", "WhatsApp.exe"):
+        try: subprocess.run(["taskkill", "/IM", exe, "/F"], capture_output=True, timeout=10, creationflags=flags)
+        except Exception: pass
+    time.sleep(2)
+    try:
+        subprocess.Popen(["explorer.exe", f"shell:AppsFolder\\{WA_APP_ID}"], creationflags=flags)
+        return True
+    except Exception:
+        return False
+
+def _ask_yes_no(text, title):
+    try:
+        import ctypes
+        return ctypes.windll.user32.MessageBoxW(0, text, title, 0x04 | 0x20 | 0x40000) == 6  # YESNO|QUESTION|TOPMOST -> IDYES
+    except Exception:
+        return False
+
 def setup():
     """Create folders, extract files, configure registry"""
     for d in ["data", "data/Images", "data/Videos", "data/Sounds", "data/Docs"]:
@@ -158,16 +181,21 @@ def setup():
     # Enable debug port on first run
     first_run = ensure_debug_port()
     if first_run:
-        # Show a notification that WhatsApp needs restart
-        try:
-            import ctypes
-            ctypes.windll.user32.MessageBoxW(0,
-                "WPlus has been configured!\n\n"
-                "Please restart WhatsApp Desktop for changes to take effect.\n"
-                "(Close WhatsApp from the system tray, then reopen it)\n\n"
-                "WPlus will wait and connect automatically.",
-                "WPlus — First Time Setup", 0x40)
-        except: pass
+        # WebView2 reads the policy only when WhatsApp starts
+        if is_wa_running():
+            if _ask_yes_no("WPlus has been configured!\n\n"
+                           "WhatsApp Desktop has to restart once for WPlus to connect.\n"
+                           "Restart WhatsApp now?\n\n"
+                           "(You can also do it later from the WPlus tray menu.)",
+                           "WPlus — First Time Setup"):
+                restart_whatsapp()
+        else:
+            try:
+                import ctypes
+                ctypes.windll.user32.MessageBoxW(0,
+                    "WPlus has been configured!\n\nOpen WhatsApp Desktop — WPlus connects automatically.",
+                    "WPlus — First Time Setup", 0x40 | 0x40000)
+            except Exception: pass
 
     # Extract bundled JS files next to data/ (if not already there or outdated)
     for filename in ["engine.js", "ui.js"]:
@@ -213,9 +241,9 @@ def start_file_server(port):
     if fileserver is None:
         raise RuntimeError(f"fileserver module not found ({fileserver_error})")
     try:
-        server = fileserver.start_server(port, data_dir=DATA_DIR, token=SERVER_TOKEN)
+        server = fileserver.start_server(port, data_dir=DATA_DIR, token=SERVER_TOKEN, on_deleted=on_deleted_saved)
     except OSError:
-        server = fileserver.start_server(0, data_dir=DATA_DIR, token=SERVER_TOKEN)
+        server = fileserver.start_server(0, data_dir=DATA_DIR, token=SERVER_TOKEN, on_deleted=on_deleted_saved)
     FILE_SERVER_PORT = server.server_address[1]
     return FILE_SERVER_PORT
 
@@ -521,6 +549,35 @@ def on_quit(icon, item):
     icon.stop()
 
 @in_background
+def on_restart_whatsapp(icon, item):
+    log("Restarting WhatsApp...")
+    state["injected"] = False
+    state["ws_url"] = None
+    restart_whatsapp()
+
+def notify(title, text):
+    """Windows notification from the tray icon (silently skipped if unavailable)."""
+    icon = state.get("icon")
+    try:
+        if icon is not None and getattr(icon, "HAS_NOTIFICATION", True):
+            icon.notify(text, title)
+    except Exception: pass
+
+_TYPE_LABEL = {"chat": "Message", "image": "Photo", "video": "Video", "ptt": "Voice message", "audio": "Audio",
+               "sticker": "Sticker", "document": "Document", "location": "Location", "vcard": "Contact"}
+
+def on_deleted_saved(info):
+    """File server callback for a newly saved deleted message: show where, never the content."""
+    try:
+        with open(FILES["wplus_cfg"], "r", encoding="utf-8") as f:
+            if json.load(f).get("notifyDeleted") is False:
+                return
+    except (OSError, ValueError, AttributeError): pass
+    chat = str(info.get("chat") or "a chat")[:60]
+    label = _TYPE_LABEL.get(info.get("type"), "Message")
+    notify("Deleted message saved", f"{label} deleted in {chat}")
+
+@in_background
 def on_reinject(icon, item):
     if state["ws_url"]:
         try: uninject(state["ws_url"])
@@ -571,6 +628,7 @@ def create_tray():
             pystray.MenuItem(lambda text: f"v{CURRENT_VERSION}", None, enabled=False),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Re-inject Plugin", on_reinject),
+            pystray.MenuItem("Restart WhatsApp", on_restart_whatsapp),
             pystray.MenuItem("Check for Updates", on_check_update),
             pystray.MenuItem("Run at Startup", on_toggle_startup, checked=startup_checked),
             pystray.Menu.SEPARATOR,
@@ -637,6 +695,10 @@ def service_loop():
             # Without the machine-wide policy (UAC prompt declined) WebView2 150+ keeps the port closed
             log("No debug port — restart WhatsApp" if hklm else
                 "No debug port — restart WPlus and allow the admin prompt, then restart WhatsApp")
+            if hklm and not state.get("port_hint_shown"):
+                state["port_hint_shown"] = True
+                notify("WPlus can't connect yet",
+                       "WhatsApp was started before WPlus was set up. Right-click the WPlus icon → Restart WhatsApp.")
             return False
         state["ws_url"] = wa["webSocketDebuggerUrl"]
         ensure_bridge(state["ws_url"])

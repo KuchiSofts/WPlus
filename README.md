@@ -36,6 +36,7 @@ account, no cloud, no telemetry.
 | **Keep deleted messages** | Incoming messages are backed up locally for 60 hours. If the sender deletes one for everyone, WPlus restores the original text in the chat and keeps a copy. |
 | **Saved messages list** | Browse every deleted message WPlus caught from the panel, open a preview, or jump to it in the chat. |
 | **Media preservation** | Deleted photos, videos and voice notes (and documents that were already downloaded) are saved as files in `data/`. |
+| **Deleted-message alerts** | A Windows notification tells you when WPlus caught a deleted message — it shows only the chat name and the kind of message, never its content. Can be turned off in *Settings*. |
 | **Restore button** | A shield button in the chat header loads older history and restores deleted messages in the open chat. |
 | **View-once capture** | WPlus tries to keep a copy of view-once photos and videos you receive (in WhatsApp's local browser storage; a capture too large for that storage is kept only until WhatsApp is restarted) and lifts the one-view limit in your client. Please respect the sender's intent — they chose to share it once. |
 
@@ -71,8 +72,9 @@ account, no cloud, no telemetry.
 2. Put it in its own folder (WPlus creates a `data/` folder next to it) and run it.
    If that folder is not writable (for example `Program Files`), WPlus uses
    `%LOCALAPPDATA%\WPlus\data` instead.
-3. On first run WPlus enables the debug bridge for WhatsApp Desktop and asks
-   you to **restart WhatsApp once** (quit it from the tray, then reopen it).
+3. On first run WPlus enables the debug bridge for WhatsApp Desktop. Windows
+   shows **one administrator prompt** for this, and WPlus then offers to
+   **restart WhatsApp** for you (WhatsApp only reads the setting when it starts).
 4. The **W+** shield appears in the system tray and a WPlus button appears in
    WhatsApp's left sidebar.
 
@@ -86,9 +88,29 @@ for the release build.
 
 ### Tray menu
 
-Right-click the **W+** icon: *Re-inject Plugin*, *Check for Updates*,
-*Run at Startup*, *Open Data Folder*, *Open WPlus Folder*, *GitHub*,
-*Quit WPlus* (removes the plugin from the running WhatsApp window).
+Right-click the **W+** icon: *Re-inject Plugin*, *Restart WhatsApp*,
+*Check for Updates*, *Run at Startup*, *Open Data Folder*, *Open WPlus Folder*,
+*GitHub*, *Quit WPlus* (removes the plugin from the running WhatsApp window).
+The first line shows the live connection status.
+
+---
+
+## What's new in 2.1.0
+
+- **Deleted messages are caught again on current WhatsApp Desktop.** WhatsApp
+  now replaces a message deleted for everyone with a new "revoked" message;
+  WPlus pairs the two and restores the original.
+- **Message ids work again** (WhatsApp changed its message-key format), so
+  saved messages, restoring older chats and *jump to message* find the right
+  message.
+- **Restart WhatsApp** from the tray, offered automatically after setup.
+- **Deleted-message alerts** (chat name only) — can be turned off.
+- Much lighter: the service talks to WhatsApp over one direct DevTools
+  connection instead of starting PowerShell every few seconds.
+- Dozens of reliability fixes: no leftovers after *Re-inject*/*Quit*,
+  storage-full handling, safer file server (no port sharing, no data loss on a
+  corrupt or locked file), single instance, falls back to
+  `%LOCALAPPDATA%\WPlus` when its folder is read-only.
 
 ---
 

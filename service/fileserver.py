@@ -435,6 +435,11 @@ class Handler(BaseHTTPRequestHandler):
                 if found is not None:
                     save_json(NEW_MSGS, remaining)
 
+            # First time this deletion is seen (media follows in a second POST) — tell the tray app
+            if existing is None and ON_DELETED is not None:
+                info = {k: entry.get(k) for k in ("id", "type", "chat", "sender")}
+                threading.Thread(target=_safe_call, args=(ON_DELETED, info), daemon=True).start()
+
             self._ok({"deleted": True, "hasMedia": bool(entry.get("mediaFile")),
                       "mediaFile": entry.get("mediaFile") or ""})
             return
@@ -498,13 +503,20 @@ class Server(ThreadingHTTPServer):
             self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
         super().server_bind()
 
-def start_server(port=PORT, data_dir=None, token=None):
+ON_DELETED = None  # optional callback(info) for a newly saved deleted message
+
+def _safe_call(fn, *args):
+    try: fn(*args)
+    except Exception: pass
+
+def start_server(port=PORT, data_dir=None, token=None, on_deleted=None):
     """Start the server in a background thread. Returns the HTTPServer
     (server.server_address[1] is the bound port; pass port=0 for any free port).
     Raises OSError if the port is already in use."""
-    global TOKEN
+    global TOKEN, ON_DELETED
     configure(data_dir or DATA_DIR)
     TOKEN = token or secrets.token_urlsafe(32)
+    ON_DELETED = on_deleted
     server = Server(("127.0.0.1", port), Handler)
     t = threading.Thread(target=server.serve_forever, daemon=True)
     t.start()

@@ -166,6 +166,8 @@
     '<div class="wpp-sec">Settings</div>'+
     T('checkUpdates',I.ch,'Check for updates','Asks api.github.com for new releases',cfgRaw('checkUpdates')!==false)+
     '<div class="wpp-div"></div>'+
+    T('notifyDeleted',I.ch,'Notify on deleted messages','Windows notification with the chat name only — never the content',cfgRaw('notifyDeleted')!==false)+
+    '<div class="wpp-div"></div>'+
     T('debugEnabled',I.ch,'Debug logging','Off by default — log may contain message previews',cfg('debugEnabled')===true)+
     '<div class="wpp-div"></div>'+
     R('debug-status',I.ch,'System status','Engine, hooks, storage info','')+
