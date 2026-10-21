@@ -417,28 +417,40 @@ def latest_release_for_page():
     data = fetch_latest_release()
     return {"tag_name": data.get("tag_name", ""), "html_url": data.get("html_url", "")}
 
+def ver_tuple(v):
+    """'v2.0.10' -> (2, 0, 10). Pre-release/build suffixes ('-beta', '+x') are ignored
+    and trailing zeros dropped, so '2.1' == '2.1.0'. Returns () if there is no number."""
+    import re
+    m = re.match(r"\s*[vV]?(\d+(?:\.\d+)*)", str(v or ""))
+    if not m:
+        return ()
+    t = [int(x) for x in m.group(1).split(".")]
+    while len(t) > 1 and t[-1] == 0:
+        t.pop()
+    return tuple(t)
+
 def check_for_update():
-    """Check GitHub releases for a newer version. Returns (has_update, latest_tag, download_url) or (False, None, None)"""
+    """Check GitHub releases for a newer version. Returns (has_update, latest_tag, download_url);
+    latest_tag is None if the check itself failed (offline, rate-limited, bad reply)."""
     try:
         data = fetch_latest_release()
         if not data:
             return False, None, None
 
-        latest_tag = data.get("tag_name", "").lstrip("v")
-        if not latest_tag:
+        latest_tag = str(data.get("tag_name") or "").lstrip("vV")
+        if not ver_tuple(latest_tag):
             return False, None, None
-
-        # Compare versions
-        def ver_tuple(v):
-            return tuple(int(x) for x in v.split(".") if x.isdigit())
 
         if ver_tuple(latest_tag) > ver_tuple(CURRENT_VERSION):
             # Find the exe/zip download URL
-            dl_url = data.get("html_url", f"https://github.com/{GITHUB_REPO}/releases/latest")
-            for asset in data.get("assets", []):
-                if asset.get("name", "").endswith((".exe", ".zip")):
-                    dl_url = asset.get("browser_download_url", dl_url)
+            dl_url = data.get("html_url") or ""
+            for asset in data.get("assets") or []:
+                if str(asset.get("name", "")).endswith((".exe", ".zip")):
+                    dl_url = asset.get("browser_download_url") or dl_url
                     break
+            # The URL is opened with os.startfile: only ever hand it a GitHub https link
+            if not str(dl_url).startswith("https://github.com/"):
+                dl_url = f"https://github.com/{GITHUB_REPO}/releases/latest"
             return True, latest_tag, dl_url
 
         return False, latest_tag, None
@@ -476,6 +488,14 @@ def create_icon():
     draw.rounded_rectangle([28,20,36,44], radius=2, fill="white")
     return img
 
+def in_background(fn):
+    """Run a tray menu callback on its own thread: pystray calls callbacks on the
+    tray message loop, which freezes the icon and menu while they run."""
+    def wrapper(icon, item):
+        threading.Thread(target=fn, args=(icon, item), daemon=True).start()
+    wrapper.__name__ = fn.__name__
+    return wrapper
+
 def on_quit(icon, item):
     log("Shutting down...")
     if state["ws_url"]:
@@ -487,6 +507,7 @@ def on_quit(icon, item):
     state["running"] = False
     icon.stop()
 
+@in_background
 def on_reinject(icon, item):
     if state["ws_url"]:
         try: uninject(state["ws_url"])
@@ -500,17 +521,24 @@ def on_open_data(icon, item):
 def on_open_folder(icon, item):
     os.startfile(EXE_DIR)
 
+@in_background
 def on_check_update(icon, item):
     has_update, latest, url = check_for_update()
     if has_update:
         notify_update(latest, url)
-    else:
-        try:
-            import ctypes
+        return
+    try:
+        import ctypes
+        if latest is None:
+            ctypes.windll.user32.MessageBoxW(0,
+                "Could not check for updates (no connection to GitHub).\n\n"
+                f"Running WPlus v{CURRENT_VERSION}",
+                "WPlus — Update Check Failed", 0x30)
+        else:
             ctypes.windll.user32.MessageBoxW(0,
                 f"You're up to date!\n\nRunning WPlus v{CURRENT_VERSION}",
                 "WPlus — No Updates", 0x40)
-        except: pass
+    except Exception: pass
 
 def on_github(icon, item):
     os.startfile(f"https://github.com/{GITHUB_REPO}")
@@ -563,6 +591,8 @@ def service_loop():
         if has_update:
             log(f"Update available: v{latest}")
             notify_update(latest, url)
+        elif latest is None:
+            log("Update check failed")
         else:
             log(f"Up to date (v{CURRENT_VERSION})")
     threading.Thread(target=bg_update_check, daemon=True).start()
