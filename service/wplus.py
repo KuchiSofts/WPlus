@@ -13,7 +13,7 @@ On first run, creates data/ folder structure.
 """
 import sys, os, re, json, http.client, time, subprocess, threading, ssl, secrets
 
-CURRENT_VERSION = "2.1.0"  # Keep in sync with engine.js and package.json
+CURRENT_VERSION = "2.2.0"  # Keep in sync with engine.js and package.json
 GITHUB_REPO = "KuchiSofts/WPlus"
 
 # ── Path Setup ───────────────────────────────────────────────
