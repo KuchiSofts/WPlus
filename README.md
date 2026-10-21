@@ -33,7 +33,7 @@ account, no cloud, no telemetry.
 
 | Feature | What it does |
 |---------|--------------|
-| **Keep deleted messages** | Incoming messages are backed up locally for 60 hours. If the sender deletes one for everyone, WPlus restores the original text in the chat and keeps a copy. |
+| **Keep deleted messages** | Incoming messages are backed up locally for 60 hours. If the sender deletes one for everyone, WPlus restores the original text in the chat — marked with a red **Deleted** badge — and keeps a copy. |
 | **Saved messages list** | Browse every deleted message WPlus caught from the panel, open a preview, or jump to it in the chat. |
 | **Media preservation** | Deleted photos, videos and voice notes (and documents that were already downloaded) are saved as files in `data/`. |
 | **Deleted-message alerts** | A Windows notification tells you when WPlus caught a deleted message — it shows only the chat name and the kind of message, never its content. Can be turned off in *Settings*. |
@@ -49,7 +49,7 @@ account, no cloud, no telemetry.
 | **Blur photos** | Blurs images in chats. |
 | **Blur avatars** | Blurs profile pictures. |
 | **Hide typing** | Others don't see "typing…" / "recording…". |
-| **Hide online** | You don't appear "online". |
+| **Hide online** | You don't appear "online". WPlus blocks only the "available" signal, at the lowest level every path goes through — no constant re-sending. |
 | **No blue ticks** | Read messages without sending read receipts. |
 | **Private listen** | Play voice messages without the "played" notification. |
 
@@ -94,6 +94,12 @@ Right-click the **W+** icon: *Re-inject Plugin*, *Restart WhatsApp*,
 The first line shows the live connection status.
 
 ---
+
+## What's new in 2.2.0
+
+- **Deleted badge:** restored messages get a red ring and a *Deleted* badge in the chat.
+- **Smarter Hide online:** blocks every "online" signal at the presence protocol instead of sending "offline" every second (lighter and less noticeable).
+- **Clear all** now also deletes the saved media files of those messages.
 
 ## What's new in 2.1.0
 
@@ -204,7 +210,7 @@ is not writable):
 | Path | Contents |
 |------|----------|
 | `data/new_messages.json` | Rolling backup of incoming messages (text, sender, chat name) from the last 60 hours, so they can be restored if deleted. Older entries and their media are removed automatically. |
-| `data/deleted_messages.json` | Messages that were deleted for everyone and caught by WPlus. Kept until you use *Clear all*. |
+| `data/deleted_messages.json` | Messages that were deleted for everyone and caught by WPlus. Kept until you use *Clear all*, which also deletes their saved media files. |
 | `data/Images/`, `Videos/`, `Sounds/`, `Docs/` | Media files for the messages above. |
 | `data/settings.json` | Your panel toggles. |
 | `data/status.txt` | Tray app status log (connection state only, no message content). |

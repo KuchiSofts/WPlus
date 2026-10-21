@@ -280,7 +280,7 @@
     el.classList.add('open');
   };
 
-  P.querySelector('[data-a="del-clear"]').onclick=function(){var c=delC();if(!c)return;uiLog('Clear history clicked',{count:c});if(confirm('Delete '+c+' saved messages?')){if(W.deletedMsgs)W.deletedMsgs('clear');else localStorage.removeItem('wplus_del');document.getElementById('wp-dl').classList.remove('open');refresh();uiLog('History cleared');}};
+  P.querySelector('[data-a="del-clear"]').onclick=function(){var c=delC();if(!c)return;uiLog('Clear history clicked',{count:c});if(confirm('Delete '+c+' saved messages and their saved media files?\n\nThis cannot be undone.')){if(W.deletedMsgs)W.deletedMsgs('clear');else localStorage.removeItem('wplus_del');document.getElementById('wp-dl').classList.remove('open');refresh();uiLog('History cleared');}};
 
   P.querySelector('[data-a="export"]').onclick=function(){uiLog('Export contacts clicked');if(W.exportContacts)W.exportContacts();else alert('Loading...');};
 

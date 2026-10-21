@@ -3,11 +3,11 @@
   'use strict';
   // Allow re-injection by cleaning up previous instance
   if(window.__wplus&&window.__wplus.cleanup)try{window.__wplus.cleanup();}catch(e){}
-  window.__wplus={version:'2.1.0',ready:false};  // Keep in sync with CURRENT_VERSION in service/wplus.py
+  window.__wplus={version:'2.2.0',ready:false};  // Keep in sync with CURRENT_VERSION in service/wplus.py
 
   var MAX_MSGS=1000;
   var CC=null,CON=null,GRP=null;
-  var _comp,_rec,_pres,_seen,_played,_mods={};
+  var _comp,_rec,_pres,_seen,_played,_proto,_mods={};
   var presInt=null;
   // Lifecycle: everything added to WhatsApp is tracked so cleanup() can take it all back
   var dead=false,_subs=[],_cols=[],_timers={},_onCleanup=[];
@@ -216,8 +216,9 @@
       dbg('init','ChatCollection found',{chats:CC._models.length});
       try{CON=window.require("WAWebContactCollection").ContactCollection;dbg('init','ContactCollection found',{contacts:(CON._models||[]).length});}catch(e){dbg('init','ContactCollection failed',e.message);}
       try{GRP=window.require("WAWebGroupMetadataCollection").GroupMetadataCollection;dbg('init','GroupMetadata found',{groups:(GRP._models||[]).length});}catch(e){}
-      var fx=findExports(["markComposing","sendPresenceAvailable","sendPresenceUnavailable","sendConversationSeen","markPlayed"]);
-      _mods={comp:fx.markComposing,pres:fx.sendPresenceAvailable,unav:fx.sendPresenceUnavailable,seen:fx.sendConversationSeen,played:fx.markPlayed};
+      var fx=findExports(["markComposing","sendPresenceAvailable","sendPresenceUnavailable","sendConversationSeen","markPlayed","sendPresenceStatusProtocol"]);
+      _mods={comp:fx.markComposing,pres:fx.sendPresenceAvailable,unav:fx.sendPresenceUnavailable,seen:fx.sendConversationSeen,played:fx.markPlayed,proto:fx.sendPresenceStatusProtocol};
+      if(_mods.proto){_proto=orig(_mods.proto.sendPresenceStatusProtocol);dbg('init','Presence protocol hook ready');}
       if(_mods.comp){_comp=orig(_mods.comp.markComposing);_rec=orig(_mods.comp.markRecording);dbg('init','Composing hooks ready');}
       if(_mods.pres){_pres=orig(_mods.pres.sendPresenceAvailable);dbg('init','Presence hook ready');}
       if(_mods.seen){_seen=orig(_mods.seen.sendConversationSeen);dbg('init','ConversationSeen hook ready');}
@@ -250,9 +251,38 @@
         var body=placeholder(msg.__x_backupType,msg.__x_backupCaption,msg.__x_backupBody||msg.__x_backupText||'',msg.__x_backupLat,msg.__x_backupLng);
         msg.__x_type='chat';msg.__x_body=HEADER+body;msg.__x_text=HEADER+body;
       }
-      msg.__x_isRevoked=false;msg.__wpRestored=true;
+      msg.__x_isRevoked=false;msg.__wpRestored=true;markDeleted(msg);
       dbg('restore','Msg restored: '+(msg.__x_backupType||'chat')+' | '+String(msg.__x_backupBody||'').substring(0,30));
     }catch(e){dbg('restore','Error: '+e.message);}
+  }
+
+  // ── "Deleted" badge on restored bubbles ──────────────────
+  // Rows carry the short message id (id.id) in data-id; restored ones get a red ring + "Deleted" badge.
+  var _delIds=new Set(),_delObs=null,_delTimer=null;
+  var DEL_CSS='.wplus-del{box-shadow:0 0 0 2px rgba(239,68,68,.85)!important;border-radius:8px}'+
+    '.wplus-del::after{content:"\u{1F6AB} Deleted";position:absolute;top:-9px;right:10px;z-index:3;background:#ef4444;color:#fff;'+
+    'font:600 10px/16px system-ui,-apple-system,"Segoe UI",sans-serif;padding:0 7px;border-radius:8px;pointer-events:none;'+
+    'box-shadow:0 1px 2px rgba(0,0,0,.35);white-space:nowrap}';
+  function markDeleted(msg){
+    try{
+      var k=msg&&msg.__x_id,i=k&&k.id;if(!i||dead)return;
+      _delIds.add(String(i));
+      if(!document.getElementById('wplus-del-style')){var st=document.createElement('style');st.id='wplus-del-style';st.textContent=DEL_CSS;document.head.appendChild(st);}
+      if(!_delObs&&window.MutationObserver){
+        var app=document.getElementById('app')||document.body;
+        _delObs=new MutationObserver(scheduleDelPaint);_delObs.observe(app,{childList:true,subtree:true});
+      }
+      scheduleDelPaint();
+    }catch(e){}
+  }
+  function scheduleDelPaint(){if(_delTimer||dead||!_delIds.size)return;_delTimer=later(function(){_delTimer=null;paintDeleted();},150);}
+  function paintDeleted(){
+    var main=document.getElementById('main');if(!main)return;
+    main.querySelectorAll('[data-id]').forEach(function(r){
+      if(!_delIds.has(r.getAttribute('data-id')))return;
+      var c=r.querySelector('[data-testid="msg-container"]')||r;
+      if(!c.classList.contains('wplus-del'))c.classList.add('wplus-del');
+    });
   }
 
   // Keep a copy of an incoming message on the model itself (for every loaded message, not only new ones,
@@ -438,13 +468,39 @@
     }catch(e){}
   }
 
+  // ── Hide online ───────────────────────────────────────────
+  // Every "available" presence (focus, typing, reconnect, any caller) ends in
+  // WASendPresenceStatusProtocol.sendPresenceStatusProtocol({status}); dropping only status
+  // "available" there keeps you offline without re-sending "unavailable" every second.
+  function sendUnavailable(){try{var u=_mods.unav,r=u&&u.sendPresenceUnavailable();if(r&&r.catch)r.catch(function(){});}catch(e){}}
+  function toggleOnline(on){
+    var p=_mods.pres,pr=_mods.proto;
+    if(!(p&&_pres)&&!(pr&&_proto)){dbg('toggle','presence functions not available');return;}
+    if(on){
+      if(pr&&_proto){
+        var f=function(a){if(a&&a.status==='available')return Promise.resolve();return _proto.apply(this,arguments);};
+        f.__wpOrig=_proto;pr.sendPresenceStatusProtocol=f;
+      }else if(!presInt){presInt=setInterval(sendUnavailable,30000);}  // older builds: periodic fallback
+      if(p&&_pres)p.sendPresenceAvailable=noop(_pres);
+      sendUnavailable();
+      dbg('toggle','Online status hidden');
+    }else{
+      if(pr&&_proto)pr.sendPresenceStatusProtocol=_proto;
+      if(p&&_pres)p.sendPresenceAvailable=_pres;
+      if(presInt){clearInterval(presInt);presInt=null;}
+      // Show as online again right away (WhatsApp would otherwise wait for the next focus)
+      try{if(document.hasFocus()&&_pres){var r=_pres.call(p);if(r&&r.catch)r.catch(function(){});}}catch(e){}
+      dbg('toggle','Online status restored');
+    }
+  }
+
   // ── Toggle features ───────────────────────────────────────
   function applyToggle(id,on){
     dbg('toggle',id+' → '+(on?'ON':'OFF'));
     // Replacements return a Promise like the originals, so WhatsApp's own .then() chains keep working
     try{
     if(id==='hideTyping'){var c=_mods.comp;if(c&&_comp){if(on){c.markComposing=noop(_comp);if(_rec)c.markRecording=noop(_rec);dbg('toggle','Typing indicator hooked');}else{c.markComposing=_comp;if(_rec)c.markRecording=_rec;dbg('toggle','Typing indicator restored');}}else dbg('toggle','markComposing not available');}
-    if(id==='hideOnline'){var p=_mods.pres;if(p&&_pres){if(on){p.sendPresenceAvailable=noop(_pres);if(!presInt){var u=_mods.unav;if(u){presInt=setInterval(function(){try{var r=u.sendPresenceUnavailable();if(r&&r.catch)r.catch(function(){});}catch(e){}},1000);dbg('toggle','Presence set to unavailable (1s interval)');}}dbg('toggle','Online status hidden');}else{p.sendPresenceAvailable=_pres;if(presInt){clearInterval(presInt);presInt=null;}dbg('toggle','Online status restored');}}else dbg('toggle','sendPresenceAvailable not available');}
+    if(id==='hideOnline')toggleOnline(on);
     if(id==='disableReceipts'){var s=_mods.seen;if(s&&_seen){if(on){s.sendConversationSeen=noop(_seen);dbg('toggle','Read receipts disabled');}else{s.sendConversationSeen=_seen;dbg('toggle','Read receipts restored');}}else dbg('toggle','sendConversationSeen not available');}
     if(id==='playAudioPrivate'){var pl=_mods.played;if(pl&&_played){if(on){pl.markPlayed=noop(_played);dbg('toggle','Audio play status hidden');}else{pl.markPlayed=_played;dbg('toggle','Audio play status restored');}}else dbg('toggle','markPlayed not available');}
     }catch(e){dbg('toggle',id+' failed: '+e.message);}
@@ -708,7 +764,7 @@
         var body=placeholder(saved.type,saved.caption,saved.body||saved.text||'',saved.lat,saved.lng);
         msg.__x_type='chat';msg.__x_body=HEADER+body;msg.__x_text=HEADER+body;
       }
-      msg.__x_isRevoked=false;msg.__wpRestored=true;msg.__wpSavedId=saved.id;
+      msg.__x_isRevoked=false;msg.__wpRestored=true;msg.__wpSavedId=saved.id;markDeleted(msg);
       dbg('restore','Applied: '+(saved.type||'chat')+' | '+String(saved.body||saved.text||'?').substring(0,30));
       return true;
     }catch(e){dbg('restore','Apply error: '+e.message);return false;}
@@ -1010,7 +1066,7 @@
         groups:GRP?(GRP._models||[]).length:0,
         deletedMsgs:deletedMsgs('get').length,
         hookedChats:CC?(CC._models||[]).filter(function(c){return c.msgs&&c.msgs.__wp;}).length:0,
-        hooks:{composing:!!_comp,presence:!!_pres,seen:!!_seen,played:!!_played},
+        hooks:{composing:!!_comp,presence:!!_pres,presenceProtocol:!!_proto,seen:!!_seen,played:!!_played},
         settings:settings(),
         logEntries:debugLog.length
       };
@@ -1024,6 +1080,9 @@
     // Stop timers
     if(presInt){clearInterval(presInt);presInt=null;}
     Object.keys(_timers).forEach(function(id){clearTimeout(+id);});_timers={};
+    try{if(_delObs)_delObs.disconnect();}catch(e){}_delObs=null;_delTimer=null;_delIds.clear();
+    document.querySelectorAll('.wplus-del').forEach(function(e){e.classList.remove('wplus-del');});
+    var dst=document.getElementById('wplus-del-style');if(dst)dst.remove();
     // Remove every collection listener and the "already hooked" markers
     _subs.forEach(function(s){try{s[0].off(s[1],s[2]);}catch(e){}});_subs=[];_removed={};_pendingRev={};
     _cols.forEach(function(c){try{delete c.__wp;delete c.__wpR;}catch(e){}});_cols=[];
@@ -1036,6 +1095,7 @@
     // Restore original WhatsApp functions
     try{if(_mods.comp&&_comp){_mods.comp.markComposing=_comp;if(_rec)_mods.comp.markRecording=_rec;}}catch(e){}
     try{if(_mods.pres&&_pres)_mods.pres.sendPresenceAvailable=_pres;}catch(e){}
+    try{if(_mods.proto&&_proto)_mods.proto.sendPresenceStatusProtocol=_proto;}catch(e){}
     try{if(_mods.seen&&_seen)_mods.seen.sendConversationSeen=_seen;}catch(e){}
     try{if(_mods.played&&_played)_mods.played.markPlayed=_played;}catch(e){}
 
