@@ -34,7 +34,8 @@ assessing its security:
   how the injection works. Run `scripts/uninstall.bat` to remove it.
 - **Local file server (127.0.0.1:18733).** Stores and serves backed-up media
   for the injected scripts. It:
-  - binds to 127.0.0.1 only and rejects non-local `Host` headers;
+  - binds to 127.0.0.1 only (exclusively, so no other program can share the
+    port; if 18733 is taken it uses a free port) and rejects non-local `Host` headers;
   - accepts browser requests only from `https://*.whatsapp.com` origins;
   - requires a random per-session token that the tray app injects together
     with the scripts;

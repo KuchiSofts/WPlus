@@ -206,9 +206,18 @@ except Exception as e:
 import cdpbridge  # Page <-> file server channel (WhatsApp's CSP blocks direct requests)
 
 def start_file_server(port):
+    """Start the file server and return the port it listens on. If the port is taken
+    by another program, any free port is used: the page reaches the server only
+    through the CDP bridge, which is told the actual port."""
+    global FILE_SERVER_PORT
     if fileserver is None:
         raise RuntimeError(f"fileserver module not found ({fileserver_error})")
-    fileserver.start_server(port, data_dir=DATA_DIR, token=SERVER_TOKEN)
+    try:
+        server = fileserver.start_server(port, data_dir=DATA_DIR, token=SERVER_TOKEN)
+    except OSError:
+        server = fileserver.start_server(0, data_dir=DATA_DIR, token=SERVER_TOKEN)
+    FILE_SERVER_PORT = server.server_address[1]
+    return FILE_SERVER_PORT
 
 # ── Tray Icon ────────────────────────────────────────────────
 from PIL import Image, ImageDraw
