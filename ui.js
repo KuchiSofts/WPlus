@@ -784,8 +784,11 @@
       var CC=window.require("WAWebChatCollection").ChatCollection;
       var chat=null;
 
+      // Method 0: WhatsApp's own notion of the open chat
+      try{if(CC.getActive)chat=CC.getActive()||null;}catch(x){}
+
       // Method 1: Find by header name
-      var headers=document.querySelectorAll('header');
+      var headers=chat?[]:document.querySelectorAll('header');
       headers.forEach(function(h){
         var r=h.getBoundingClientRect();
         if(r.x>400&&r.width>200){
@@ -806,7 +809,7 @@
       var loader=window.require("WAWebChatLoadMessages");
       var before=chat.msgs&&chat.msgs._models?chat.msgs._models.length:0;
 
-      loader.loadEarlierMsgs(chat).then(function(){
+      Promise.resolve(loader.loadEarlierMsgs(chat)).then(function(){
         var after=chat.msgs&&chat.msgs._models?chat.msgs._models.length:0;
         var loaded=after-before;
         _loadingOlder=false;
