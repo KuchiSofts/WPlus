@@ -304,7 +304,7 @@
   function onRevoked(msg,chat){
     if(msg.__wpSaved){restoreMsg(msg);return;}  // WhatsApp marked it revoked again — already saved
     msg.__wpSaved=true;
-    var msgId=sid(msg.__x_id)||'?';
+    var msgId=msg.__wpOrigId||sid(msg.__x_id)||'?';
     var sender=msg.__x_backupSender||'?';
     dbg('msg:del','MESSAGE DELETED',{id:msgId.substring(0,50),originalType:msg.__x_backupType,chat:chatTitle(chat),sender:sender.split('@')[0],
       bodyPreview:String(msg.__x_backupBody||msg.__x_backupText||'').substring(0,60).replace(/[\n\r]/g,' '),
@@ -346,6 +346,36 @@
     fire('update');
   }
 
+  // Current WhatsApp handles "delete for everyone" by REMOVING the original message and ADDING a new
+  // 'revoked' message whose protocolMessageKey points to the original (WAWebDBProcessRevokeMsgs).
+  // The two events can arrive in either order, so each side waits briefly for the other.
+  var _removed={},_pendingRev={},PAIR_MS=120000;
+  var BK_FIELDS=['__x_backupBody','__x_backupText','__x_backupType','__x_backupCaption','__x_backupMediaData','__x_backupLat','__x_backupLng','__x_backupTime','__x_backupSender'];
+  function origKey(msg){var k=msg&&(msg.__x_protocolMessageKey||msg.protocolMessageKey);return k?(sid(k)||String(k)):null;}
+  function prunePairs(){var t=Date.now()-PAIR_MS;[_removed,_pendingRev].forEach(function(o){Object.keys(o).forEach(function(k){if(o[k].t<t)delete o[k];});});}
+  function takeOver(orig,rev,chat){
+    if(rev.__wpSaved)return;
+    BK_FIELDS.forEach(function(f){rev[f]=orig[f];});
+    rev.__wpOrigId=sid(orig.__x_id);orig.__wpSaved=true;
+    onRevoked(rev,chat);
+    // The revoked model may already be on screen: tell WhatsApp's views to re-read it
+    try{if(rev.trigger){rev.trigger('change:type',rev,rev.__x_type);rev.trigger('change:body',rev,rev.__x_body);}}catch(e){}
+  }
+  function onRevokedAdded(msg,chat){
+    var k=origKey(msg);if(!k||msg.__wpSaved)return false;
+    var r=_removed[k],orig=r&&r.m;
+    if(!orig){try{var live=chat.msgs.get&&chat.msgs.get(k);if(live&&live!==msg)orig=live;}catch(e){}}
+    if(orig&&orig.__x_backupType){delete _removed[k];takeOver(orig,msg,chat);return true;}
+    _pendingRev[k]={m:msg,t:Date.now()};prunePairs();
+    return false;
+  }
+  function onRemoved(msg,chat){
+    if(!msg||!msg.__x_backupType||msg.__wpSaved)return;
+    var k=sid(msg.__x_id);if(!k)return;
+    var p=_pendingRev[k];if(p){delete _pendingRev[k];takeOver(msg,p.m,chat);return;}
+    _removed[k]={m:msg,t:Date.now()};prunePairs();
+  }
+
   // Runs inside WhatsApp's collection 'add' — must never throw
   function hookChat(chat){try{hookChatMsgs(chat);}catch(e){if(chat&&chat.msgs)delete chat.msgs.__wp;dbg('init','hookChat failed: '+e.message);}}
   function hookChatMsgs(chat){
@@ -353,10 +383,12 @@
     (chat.msgs._models||[]).forEach(function(m){try{if(backup(m))postNew(m,chat);}catch(e){}});
 
     listen(chat.msgs,'add',function(msg){try{
+      if(msg&&msg.__x_type==='revoked'){onRevokedAdded(msg,chat);return;}
       if(backup(msg))postNew(msg,chat);
     }catch(e){dbg('msg:new','ERROR: '+e.message);}});
+    listen(chat.msgs,'remove',function(msg){try{onRemoved(msg,chat);}catch(e){dbg('msg:del','REMOVE HANDLER ERROR: '+e.message);}});
 
-    // Revoke ("deleted for everyone") changes the message's type to 'revoked' on the same model.
+    // Older WhatsApp builds revoke by changing the type to 'revoked' on the same model.
     // A message can also arrive undecrypted ('ciphertext') and only become 'chat' later.
     listen(chat.msgs,'change',function(msg){try{
       if(!msg)return;
@@ -857,6 +889,7 @@
       if(!msg||!msg.__x_id)return null;
       var savedMsgs=list||getSavedMsgs();
       var msgId=msg.__x_id._serialized||'';
+      var okey=origKey(msg);
       var msgTime=msg.__x_t?msg.__x_t*1000:0;
       var msgChat=chatObj?chatObj.id._serialized:'';
       var msgChatUser=msgChat.split('@')[0];
@@ -869,8 +902,8 @@
 
         var score=0;
 
-        // 1. Exact ID match (same session) — perfect match
-        if(s.id===msgId){score=100;bestMatch=s;bestScore=100;break;}
+        // 1. Exact ID match — the original id (protocolMessageKey on current builds) or the same model
+        if(s.id===msgId||(okey&&s.id===okey)){score=100;bestMatch=s;bestScore=100;break;}
 
         // 2. Same chat check (required)
         var savedChatUser=(s.id||'').split('_')[1]||'';
@@ -933,7 +966,8 @@
       if(!ch||!ch.msgs||ch.msgs.__wpR)return;
       listen(ch.msgs,'add',function(msg){
         try{
-          if(!msg||msg.__x_type!=='revoked')return;
+          if(!msg||msg.__x_type!=='revoked'||msg.__wpSaved)return;
+          var ok=origKey(msg);if(ok&&_pendingRev[ok])return;  // live pairing still waiting for the original
           var saved=matchSaved(msg,ch);
           if(saved){
             applyRestore(msg,saved);
@@ -990,7 +1024,7 @@
     if(presInt){clearInterval(presInt);presInt=null;}
     Object.keys(_timers).forEach(function(id){clearTimeout(+id);});_timers={};
     // Remove every collection listener and the "already hooked" markers
-    _subs.forEach(function(s){try{s[0].off(s[1],s[2]);}catch(e){}});_subs=[];
+    _subs.forEach(function(s){try{s[0].off(s[1],s[2]);}catch(e){}});_subs=[];_removed={};_pendingRev={};
     _cols.forEach(function(c){try{delete c.__wp;delete c.__wpR;}catch(e){}});_cols=[];
     // UI teardown (listeners, observers, intervals registered by ui.js)
     _onCleanup.forEach(function(fn){try{fn();}catch(e){}});_onCleanup=[];
