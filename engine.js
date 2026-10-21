@@ -810,19 +810,24 @@
     (CON._models||[]).forEach(function(c){if(!c||!c.id||c.id.server!=='c.us')return;
     cs.push({p:'+'+c.id.user,n:c.__x_name||c.__x_pushname||c.__x_formattedName||'',b:c.__x_isBusiness||false});});
     if(!cs.length){alert('No contacts.');return;}
-    var csv='Phone,Name,Business\n';cs.forEach(function(c){csv+='"'+c.p+'","'+(c.n||'').replace(/"/g,'""')+'","'+(c.b?'Yes':'No')+'"\n';});
-    var a=document.createElement('a');a.href=URL.createObjectURL(new Blob(['\ufeff'+csv],{type:'text/csv'}));
+    // Names are chosen by other people: a leading = + - @ would run as a spreadsheet formula
+    function cell(v){v=String(v==null?'':v);if(/^[=+\-@\t\r]/.test(v))v="'"+v;return '"'+v.replace(/"/g,'""')+'"';}
+    var csv='Phone,Name,Business\n';cs.forEach(function(c){csv+='"'+c.p+'",'+cell(c.n)+',"'+(c.b?'Yes':'No')+'"\n';});
+    var url=URL.createObjectURL(new Blob(['\ufeff'+csv],{type:'text/csv'}));
+    var a=document.createElement('a');a.href=url;
     a.download='WPlus_Contacts_'+new Date().toISOString().slice(0,10)+'.csv';a.click();alert('Exported '+cs.length+' contacts!');
+    setTimeout(function(){try{URL.revokeObjectURL(url);}catch(e){}},10000);
   };
   window.__wplus.chatStats=function(){
-    if(!CC)return'Loading...';var ch=CC._models||[],g=0,p=0,u=0,tm=0,top=[];
-    ch.forEach(function(c){if(!c||!c.id)return;c.id.server==='g.us'?g++:p++;if(c.__x_unreadCount>0)u++;
+    if(!CC)return'Loading...';var ch=CC._models||[],g=0,p=0,o=0,u=0,tm=0,top=[];
+    // Status, broadcast lists and channels are neither personal chats nor groups
+    ch.forEach(function(c){if(!c||!c.id)return;var sv=c.id.server;if(sv==='g.us')g++;else if(sv==='c.us'||sv==='lid')p++;else o++;if(c.__x_unreadCount>0)u++;
     var mc=c.msgs&&c.msgs._models?c.msgs._models.length:0;tm+=mc;
     top.push({n:c.__x_name||c.__x_formattedTitle||c.id.user||'?',m:mc,u:c.__x_unreadCount||0,g:c.id.server==='g.us'});});
     top.sort(function(a,b){return b.m-a.m;});
     var cc=CON?(CON._models||[]).filter(function(c){return c&&c.id&&c.id.server==='c.us';}).length:0;
-    var t=ch.length+' chats ('+p+' personal, '+g+' groups)\n'+u+' unread \u00B7 '+cc+' contacts \u00B7 '+tm+' loaded msgs\n\n';
-    top.slice(0,10).forEach(function(c,i){t+=(i+1)+'. '+c.n.substring(0,22)+(c.g?' [G]':'')+' \u2014 '+c.m+(c.u>0?' ('+c.u+')':'')+'\n';});
+    var t=ch.length+' chats ('+p+' personal, '+g+' groups'+(o?', '+o+' other':'')+')\n'+u+' unread \u00B7 '+cc+' contacts \u00B7 '+tm+' loaded msgs\n\n';
+    top.slice(0,10).forEach(function(c,i){t+=(i+1)+'. '+String(c.n).substring(0,22)+(c.g?' [G]':'')+' \u2014 '+c.m+(c.u>0?' ('+c.u+')':'')+'\n';});
     return t;
   };
   window.__wplus.downloadVO=function(id){
