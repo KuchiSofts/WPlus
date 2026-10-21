@@ -540,13 +540,15 @@
       var Cmd=window.require("WAWebCmd").Cmd;
       var search=window.require("WAWebChatMessageSearch");
       if(Cmd&&Cmd.openChatAt&&search&&search.getSearchContext){
-        var ctx=search.getSearchContext(chat,msgObj.__x_id||msgObj.id);
+        // Current WhatsApp takes one options object: {chat, msgKey}
+        var key=msgObj.__x_id||msgObj.id,ctx=search.getSearchContext.length===1?search.getSearchContext({chat:chat,msgKey:key}):search.getSearchContext(chat,key);
         Promise.resolve(Cmd.openChatAt({chat:chat,msgContext:ctx})).then(function(){
           // Flash highlight the message in the DOM
           later(function(){
             try{
-              var mid=sid(msgObj.__x_id);
-              var el=mid&&document.querySelector('[data-id="'+(window.CSS&&CSS.escape?CSS.escape(mid):mid)+'"]');
+              // Rows carry the short message id (id.id); older builds used the serialized id
+              var k=msgObj.__x_id,esc=function(v){return window.CSS&&CSS.escape?CSS.escape(v):v;};
+              var el=k&&((k.id&&document.querySelector('[data-id="'+esc(k.id)+'"]'))||(sid(k)&&document.querySelector('[data-id="'+esc(sid(k))+'"]')));
               if(el){
                 el.classList.add('wplus-msg-highlight');
                 el.scrollIntoView({behavior:'smooth',block:'center'});
