@@ -37,7 +37,7 @@ account, no cloud, no telemetry.
 | **Saved messages list** | Browse every deleted message WPlus caught from the panel, open a preview, or jump to it in the chat. |
 | **Media preservation** | Deleted photos, videos and voice notes (and documents that were already downloaded) are saved as files in `data/`. |
 | **Restore button** | A shield button in the chat header loads older history and restores deleted messages in the open chat. |
-| **View-once capture** | WPlus tries to keep a copy of view-once photos and videos you receive (in WhatsApp's local browser storage) and lifts the one-view limit in your client. Please respect the sender's intent — they chose to share it once. |
+| **View-once capture** | WPlus tries to keep a copy of view-once photos and videos you receive (in WhatsApp's local browser storage; a capture too large for that storage is kept only until WhatsApp is restarted) and lifts the one-view limit in your client. Please respect the sender's intent — they chose to share it once. |
 
 ### Privacy
 
